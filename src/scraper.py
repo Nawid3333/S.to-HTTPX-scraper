@@ -1,3 +1,5 @@
+# pylint: disable=broad-exception-caught,too-many-lines,too-many-branches
+# pylint: disable=too-many-return-statements,too-many-positional-arguments
 """
 S.TO Series Scraper — powered by httpx (no browser needed).
 """
@@ -14,7 +16,7 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from config.config import (
+from config.config import (  # pylint: disable=import-error,no-name-in-module
     EMAIL, PASSWORD, DATA_DIR, SERIES_INDEX_FILE, NUM_WORKERS,
 )
 
@@ -304,7 +306,7 @@ class ScrapingPaused(Exception):
 
 # ── SToScraper (httpx) ─────────────────────────────────────────────────────
 
-class SToScraper:
+class SToScraper:  # pylint: disable=too-many-instance-attributes
     """S.TO series scraper powered by httpx (no browser needed)."""
 
     def __init__(self):
@@ -626,8 +628,9 @@ class SToScraper:
             series.append(entry)
         return series
 
-    async def _get_account_series(self, client: httpx.AsyncClient,
-                                   source: str = 'both') -> list[dict]:
+    async def _get_account_series(
+            self, client: httpx.AsyncClient,
+            source: str = 'both') -> list[dict]:
         """Fetch subscribed/watchlist series from account pages.
 
         Args:
@@ -892,7 +895,7 @@ class SToScraper:
                 pct = int((done / total) * 100)
                 bar_len = 30
                 filled = int(bar_len * done / total)
-                bar = '█' * filled + '░' * (bar_len - filled)
+                progress_bar = '█' * filled + '░' * (bar_len - filled)
 
                 season_labels = [s.get('season', '?') for s in result.get('seasons', [])]
                 season_info = f" [{','.join(season_labels)}]" if season_labels else ""
@@ -908,11 +911,22 @@ class SToScraper:
                 ep0_warn = " ⚠ episode 0 detected" if result.get("_has_episode_zero") else ""
 
                 if result["title"].startswith("[ERROR"):
-                    print(f"[{done}/{total}] [{bar}] {pct}% | ETA: {eta_mins}m | ⚠ {info.get('title', '?')}: Failed")
+                    print(
+                        f"[{done}/{total}] [{progress_bar}] {pct}% | ETA: {eta_mins}m"
+                        f" | ⚠ {info.get('title', '?')}: Failed"
+                    )
                 elif result["total_episodes"] == 0:
-                    print(f"[{done}/{total}] [{bar}] {pct}% | ETA: {eta_mins}m | ⚠ {result['title']}{season_info}: No episodes{sub_info}")
+                    print(
+                        f"[{done}/{total}] [{progress_bar}] {pct}% | ETA: {eta_mins}m"
+                        f" | ⚠ {result['title']}{season_info}: No episodes{sub_info}"
+                    )
                 else:
-                    print(f"[{done}/{total}] [{bar}] {pct}% | ETA: {eta_mins}m | ✓ {result['title']}{season_info}: {result['watched_episodes']}/{result['total_episodes']} watched{sub_info}{ep0_warn}")
+                    print(
+                        f"[{done}/{total}] [{progress_bar}] {pct}% | ETA: {eta_mins}m"
+                        f" | ✓ {result['title']}{season_info}:"
+                        f" {result['watched_episodes']}/{result['total_episodes']}"
+                        f" watched{sub_info}{ep0_warn}"
+                    )
 
                 if done % CHECKPOINT_EVERY == 0:
                     self.series_data = list(results)
@@ -973,7 +987,10 @@ class SToScraper:
             return True
 
         if has_stale:
-            print(f"\n⚠ Episode 0 no longer exists for these ignored seasons — consider removing from .ignored_seasons.json:")
+            print(
+                "\n⚠ Episode 0 no longer exists for these ignored seasons"
+                " — consider removing from .ignored_seasons.json:"
+            )
             for w in self._stale_ignored_warnings:
                 url = w.get('url', f"{SITE_URL}/serie/{w['slug']}")
                 print(f"  • {w['title']} (season {w['season']}) → {url}")
@@ -1077,10 +1094,16 @@ class SToScraper:
 
             # Two-phase scraping: ignored-season series first
             ignored_slugs_set = {slug for slug, _ in self._get_ignored_seasons()}
-            ignored_batch = [s for s in account_series
-                            if self.get_series_slug_from_url(s.get('link', '')) in ignored_slugs_set]
-            rest_batch = [s for s in account_series
-                         if self.get_series_slug_from_url(s.get('link', '')) not in ignored_slugs_set]
+            ignored_batch = [
+                s for s in account_series
+                if self.get_series_slug_from_url(
+                    s.get('link', '')) in ignored_slugs_set
+            ]
+            rest_batch = [
+                s for s in account_series
+                if self.get_series_slug_from_url(
+                    s.get('link', '')) not in ignored_slugs_set
+            ]
 
             if ignored_batch:
                 print(f"→ Phase 1: Scraping {len(ignored_batch)} series with ignored seasons...")
@@ -1145,10 +1168,16 @@ class SToScraper:
 
         # Two-phase scraping: ignored-season series first
         ignored_slugs_set = {slug for slug, _ in self._get_ignored_seasons()}
-        ignored_batch = [s for s in all_series
-                        if self.get_series_slug_from_url(s.get('link', '')) in ignored_slugs_set]
-        rest_batch = [s for s in all_series
-                     if self.get_series_slug_from_url(s.get('link', '')) not in ignored_slugs_set]
+        ignored_batch = [
+            s for s in all_series
+            if self.get_series_slug_from_url(
+                s.get('link', '')) in ignored_slugs_set
+        ]
+        rest_batch = [
+            s for s in all_series
+            if self.get_series_slug_from_url(
+                s.get('link', '')) not in ignored_slugs_set
+        ]
 
         if ignored_batch:
             print(f"→ Phase 1: Scraping {len(ignored_batch)} series with ignored seasons...")
@@ -1216,5 +1245,3 @@ class SToScraper:
             if self.failed_links:
                 self.save_failed_series()
             raise
-
-

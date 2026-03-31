@@ -1,3 +1,5 @@
+# pylint: disable=broad-exception-caught,too-many-lines,too-many-branches
+# pylint: disable=too-many-nested-blocks,too-many-positional-arguments
 """
 S.TO Index Manager — manages the persistent series index.
 
@@ -14,7 +16,7 @@ import tempfile
 from collections import defaultdict
 from datetime import datetime
 
-from config.config import SERIES_INDEX_FILE, DATA_DIR
+from config.config import SERIES_INDEX_FILE, DATA_DIR  # pylint: disable=import-error,no-name-in-module
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +28,7 @@ def _create_file_backup(filepath):
     try:
         backup_dir = os.path.dirname(filepath)
         filename = os.path.basename(filepath)
-        
+
         # Remove oldest backup if 3 already exist
         for i in range(3, 10):
             old_backup = os.path.join(backup_dir, f"{filename}.bak{i}")
@@ -35,7 +37,7 @@ def _create_file_backup(filepath):
                     os.remove(old_backup)
                 except OSError:
                     pass
-        
+
         # Shift existing backups: .bak2 -> .bak3, .bak1 -> .bak2, original -> .bak1
         for i in range(2, 0, -1):
             src = os.path.join(backup_dir, f"{filename}.bak{i}")
@@ -45,7 +47,7 @@ def _create_file_backup(filepath):
                     shutil.move(src, dst)
                 except OSError:
                     pass
-        
+
         # Create new backup
         backup_path = os.path.join(backup_dir, f"{filename}.bak1")
         shutil.copy2(filepath, backup_path)
@@ -58,10 +60,10 @@ def _atomic_write_json(filepath, data):
     """Write JSON to file atomically via temp file + os.replace."""
     dirpath = os.path.dirname(filepath)
     os.makedirs(dirpath, exist_ok=True)
-    
+
     if os.path.exists(filepath):
         _create_file_backup(filepath)
-    
+
     fd, tmp_path = tempfile.mkstemp(dir=dirpath, suffix='.tmp')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -73,6 +75,7 @@ def _atomic_write_json(filepath, data):
         except OSError:
             pass
         raise
+
 
 _SEASON_NUMBER_RE = re.compile(r'(staffel|season|s)\s*(\d+)', re.IGNORECASE)
 
@@ -190,14 +193,14 @@ def group_episodes_by_season(episode_list, new_data, prefix='[+]'):
     for item in episode_list:
         title, season, ep_num = item[0], item[1], item[2]
         grouped[(title, season)].append(ep_num)
-    
+
     if isinstance(new_data, list):
         new_data_dict = {s.get('title'): s for s in new_data}
     elif isinstance(new_data, dict):
         new_data_dict = new_data
     else:
         new_data_dict = {}
-    
+
     result = []
     for (title, season), ep_nums in sorted(grouped.items()):
         series = new_data_dict.get(title, {})
@@ -207,7 +210,7 @@ def group_episodes_by_season(episode_list, new_data, prefix='[+]'):
         else:
             for ep_num in sorted(ep_nums):
                 result.append(f"  {prefix} {title} {format_season_ep(season, ep_num)}")
-    
+
     return result
 
 
@@ -279,7 +282,7 @@ def _detect_housekeeping_changes(old_data, new_dict):
         old_map = dict(old_data) if old_data else {}
 
     added = {}   # title -> [season_labels]
-    removed = {} # title -> [season_labels]
+    removed = {}  # title -> [season_labels]
     for title, new_entry in new_dict.items():
         o_entry = old_map.get(title)
         if not o_entry:
@@ -314,47 +317,53 @@ def detect_changes(old_data, new_data):
         "subscription_changes": [],
         "watchlist_changes": [],
     }
-    
+
     if not old_data:
         old_data = []
     if not new_data:
         new_data = []
-    
-    old_titles = set(old_data.keys()) if isinstance(old_data, dict) else {s.get('title') for s in (old_data or []) if s and s.get('title')}
-    new_titles = set(new_data.keys()) if isinstance(new_data, dict) else {s.get('title') for s in (new_data or []) if s and s.get('title')}
-    
+
+    old_titles = (
+        set(old_data.keys()) if isinstance(old_data, dict)
+        else {s.get('title') for s in (old_data or []) if s and s.get('title')}
+    )
+    new_titles = (
+        set(new_data.keys()) if isinstance(new_data, dict)
+        else {s.get('title') for s in (new_data or []) if s and s.get('title')}
+    )
+
     if isinstance(old_data, list):
         old_data = {s.get('title'): s for s in (old_data or []) if s and s.get('title')}
     if isinstance(new_data, list):
         new_data = {s.get('title'): s for s in (new_data or []) if s and s.get('title')}
-    
+
     # New series
     for title in new_titles - old_titles:
         if title:
             changes["new_series"].append(title)
-    
+
     # Episode and subscription changes for existing series
     for title in old_titles & new_titles:
         try:
             old_series = old_data.get(title, {})
             new_series = new_data.get(title, {})
-            
+
             if not old_series or not isinstance(old_series, dict):
                 continue
             if not new_series or not isinstance(new_series, dict):
                 continue
-            
+
             # Subscription status changes
             old_sub = old_series.get('subscribed')
             new_sub = new_series.get('subscribed')
             if old_sub is not None and new_sub is not None and old_sub != new_sub:
                 changes["subscription_changes"].append((title, old_sub, new_sub))
-            
+
             old_wl = old_series.get('watchlist')
             new_wl = new_series.get('watchlist')
             if old_wl is not None and new_wl is not None and old_wl != new_wl:
                 changes["watchlist_changes"].append((title, old_wl, new_wl))
-            
+
             # Build map of (season, ep_number) -> watched status for old data
             old_eps = {}
             for season in old_series.get('seasons', []):
@@ -367,7 +376,7 @@ def detect_changes(old_data, new_data):
                     ep_num = ep.get('number')
                     if ep_num is not None:
                         old_eps[(s_label, str(ep_num))] = bool(ep.get('watched', False))
-            
+
             # Check new episodes and watch status changes
             for season in new_series.get('seasons', []):
                 if not season or not isinstance(season, dict):
@@ -381,7 +390,7 @@ def detect_changes(old_data, new_data):
                         continue
                     ep_key = (s_label, str(ep_num))
                     new_watched = bool(ep.get('watched', False))
-                    
+
                     if ep_key not in old_eps:
                         changes["new_episodes"].append((title, s_label, ep_num))
                     elif old_eps[ep_key] != new_watched:
@@ -392,7 +401,7 @@ def detect_changes(old_data, new_data):
         except Exception as e:
             logger.debug(f"Error detecting changes for '{title}': {e}")
             continue
-    
+
     return changes
 
 
@@ -414,6 +423,7 @@ def show_changes(changes, include_unwatched=True, include_watched=True, new_data
 
     if changes["new_series"]:
         print(f"\n[NEW SERIES] ({len(changes['new_series'])})")
+
         def format_new_series(title):
             if not new_data:
                 return f"  + {title}"
@@ -651,7 +661,7 @@ def confirm_and_save_changes(new_data, description="data"):
         new_dict = dict(new_data)
 
     changes = detect_changes(old_data, new_dict)
-    logger.info(f"Detected changes: { {k: len(v) for k,v in changes.items()} }")
+    logger.info("Detected changes: %s", {k: len(v) for k, v in changes.items()})
 
     allow_watched, allow_unwatched = _prompt_watch_status_changes(changes, new_dict)
     allow_sub, allow_wl = _prompt_subscription_changes(changes)
@@ -731,7 +741,7 @@ def confirm_and_save_changes(new_data, description="data"):
 
     show_changes(changes, include_unwatched=allow_unwatched, include_watched=allow_watched, new_data=new_dict)
 
-    if input(f"\nSave these changes? (y/n): ").strip().lower() != 'y':
+    if input("\nSave these changes? (y/n): ").strip().lower() != 'y':
         print("✗ Changes discarded. Nothing saved.")
         return False
 
@@ -763,7 +773,7 @@ class IndexManager:
         try:
             with open(SERIES_INDEX_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            
+
             if isinstance(data, list):
                 self.series_index = {item.get("title"): item for item in data if item.get("title")}
             elif isinstance(data, dict):
@@ -771,16 +781,19 @@ class IndexManager:
                 if first_item and isinstance(first_item, dict) and first_item.get('title'):
                     self.series_index = data
                 else:
-                    self.series_index = {item.get("title"): item for item in data.values() if isinstance(item, dict) and item.get("title")}
+                    self.series_index = {
+                        item.get("title"): item for item in data.values()
+                        if isinstance(item, dict) and item.get("title")
+                    }
             else:
                 self.series_index = {}
-            
+
             validated = {}
             for title, series in self.series_index.items():
                 if _validate_series_entry(series, title):
                     validated[title] = series
             self.series_index = validated
-            
+
             print(f"[OK] Loaded {len(self.series_index)} series from index")
             logger.info(f"Loaded {len(self.series_index)} series from {SERIES_INDEX_FILE}")
         except json.JSONDecodeError as e:
@@ -797,7 +810,7 @@ class IndexManager:
         """Return detailed analytics about the series index."""
         series_with_progress = self.get_series_with_progress()
         total = len(series_with_progress)
-        
+
         if total == 0:
             return {
                 "total_series": 0,
@@ -806,18 +819,18 @@ class IndexManager:
                 "watched_percentage": 0.0,
                 "empty_series": 0
             }
-        
+
         watched = sum(1 for s in series_with_progress if not s['is_incomplete'])
         unwatched = total - watched
         empty_count = len([s for s in self.series_index.values() if s.get('empty', False)])
-        
+
         completion_percentages = [s['completion'] for s in series_with_progress]
         avg_completion = round(sum(completion_percentages) / total, 2)
-        
+
         total_episodes = sum(s['total_episodes'] for s in series_with_progress)
         watched_episodes = sum(s['watched_episodes'] for s in series_with_progress)
         avg_episodes_per_series = round(total_episodes / total, 1) if total > 0 else 0
-        
+
         completion_ranges = {
             "0-25%": sum(1 for p in completion_percentages if 0 <= p < 25),
             "25-50%": sum(1 for p in completion_percentages if 25 <= p < 50),
@@ -825,7 +838,7 @@ class IndexManager:
             "75-99%": sum(1 for p in completion_percentages if 75 <= p < 100),
             "100%": sum(1 for p in completion_percentages if p == 100)
         }
-        
+
         ongoing_only = [s for s in series_with_progress if 0 < s['completion'] < 100]
         sorted_ongoing = sorted(ongoing_only, key=lambda x: x['completion'], reverse=True)
         most_completed = sorted_ongoing[:5]
@@ -846,7 +859,7 @@ class IndexManager:
         subscribed_count = sum(1 for s in self.series_index.values() if s.get('subscribed'))
         watchlist_count = sum(1 for s in self.series_index.values() if s.get('watchlist'))
         both_count = sum(1 for s in self.series_index.values() if s.get('subscribed') and s.get('watchlist'))
-        
+
         return {
             "total_series": total,
             "watched": watched,
@@ -867,15 +880,17 @@ class IndexManager:
             "both_subscribed_and_watchlist": both_count,
             "ignored_episode_0_seasons": ignored_ep0_count,
             "most_completed_series": [
-                {"title": s['title'], "completion": s['completion'], "progress": f"{s['watched_episodes']}/{s['total_episodes']}"}
+                {"title": s['title'], "completion": s['completion'],
+                 "progress": f"{s['watched_episodes']}/{s['total_episodes']}"}
                 for s in most_completed
             ],
             "least_completed_series": [
-                {"title": s['title'], "completion": s['completion'], "progress": f"{s['watched_episodes']}/{s['total_episodes']}"}
+                {"title": s['title'], "completion": s['completion'],
+                 "progress": f"{s['watched_episodes']}/{s['total_episodes']}"}
                 for s in least_completed
             ]
         }
-        
+
     def get_full_report(self, filter_subscribed=None, filter_watchlist=None):
         """Generate a comprehensive report with categories and insights.
 
@@ -910,24 +925,24 @@ class IndexManager:
             s for s in series_progress
             if s['watched_episodes'] == 0
         ]
-        
+
         ongoing_sorted = sorted(ongoing_series, key=lambda x: x['completion'], reverse=True)
         waiting_sorted = sorted(waiting_for_new, key=lambda x: x['title'])
         ongoing_titles = [s['title'] for s in ongoing_sorted]
         not_started_titles = sorted([s['title'] for s in not_started_series])
-        
+
         episode_ranges = {
             "short_series": [s['title'] for s in series_progress if s['total_episodes'] <= 5],
             "medium_series": [s['title'] for s in series_progress if 6 <= s['total_episodes'] <= 25],
             "long_series": [s['title'] for s in series_progress if s['total_episodes'] > 25]
         }
-        
+
         completion_insights = {
             "high_completion_threshold": 80,
             "near_completion": [s['title'] for s in ongoing_sorted if 80 <= s['completion'] < 100][:10],
             "stalled_series": [s['title'] for s in ongoing_sorted if s['completion'] < 25][:10]
         }
-        
+
         report = {
             "metadata": {
                 "generated": datetime.now().isoformat(),
@@ -943,9 +958,12 @@ class IndexManager:
                 "ongoing": {
                     "count": len(ongoing_series),
                     "titles": ongoing_titles,
-                    "details": [{"title": s['title'], "completion": s['completion'], 
-                               "progress": f"{s['watched_episodes']}/{s['total_episodes']}"}
-                              for s in ongoing_sorted[:20]]
+                    "details": [
+                        {"title": s['title'],
+                         "completion": s['completion'],
+                         "progress": f"{s['watched_episodes']}/{s['total_episodes']}"}
+                        for s in ongoing_sorted[:20]
+                    ]
                 },
                 "waiting_for_new_episodes": {
                     "count": len(waiting_for_new),
@@ -975,7 +993,7 @@ class IndexManager:
             }
         }
         return report
-        
+
     def get_series_with_progress(self, sort_by='completion', reverse=False):
         """Return series list with episode progress and completion percentages."""
         series_list = []

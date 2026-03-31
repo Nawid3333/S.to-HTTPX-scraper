@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pylint: disable=broad-exception-caught,too-many-branches
 """
 S.TO Series Scraper & Index Manager  (httpx)
 
@@ -20,9 +21,11 @@ from urllib.parse import urlparse
 # Ensure project root is on sys.path so imports work from any working directory
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from config.config import EMAIL, PASSWORD, DATA_DIR, LOG_FILE
-from src.scraper import SToScraper
-from src.index_manager import (
+from config.config import (  # noqa: E402  # pylint: disable=import-error,no-name-in-module,wrong-import-position
+    EMAIL, PASSWORD, DATA_DIR, LOG_FILE,
+)
+from src.scraper import SToScraper  # noqa: E402  # pylint: disable=wrong-import-position
+from src.index_manager import (  # noqa: E402  # pylint: disable=wrong-import-position
     IndexManager, confirm_and_save_changes, show_vanished_series,
     get_episode_counts,
 )
@@ -101,7 +104,7 @@ def print_completed_series_alerts(index_manager=None):
                 if urls:
                     print(f"\n→ Rescraping {len(urls)} completed series...\n")
                     _run_scrape_and_save(
-                        run_kwargs=dict(url_list=urls, parallel=False),
+                        run_kwargs={'url_list': urls, 'parallel': False},
                         description=f"Rescrape completed series ({len(urls)})",
                         success_msg=f"Rescrape completed! {len(urls)} series updated.",
                         no_data_msg="No data scraped",
@@ -126,7 +129,7 @@ def check_disk_space(min_mb=100):
         stat = shutil.disk_usage(DATA_DIR)
         available_mb = stat.free / (1024 * 1024)
         if available_mb < min_mb:
-            print(f"\n✗ WARNING: Low disk space!")
+            print("\n✗ WARNING: Low disk space!")
             print(f"  Available: {available_mb:.1f} MB (minimum needed: {min_mb} MB)")
             return False
         return True
@@ -136,7 +139,7 @@ def check_disk_space(min_mb=100):
 
 
 def validate_credentials():
-    if not EMAIL or not PASSWORD:
+    if not (EMAIL and PASSWORD):
         print("\n✗ ERROR: Credentials not configured!")
         print("\nPlease follow these steps:")
         print("1. Copy '.env.example' to '.env' inside the config/ folder")
@@ -146,7 +149,7 @@ def validate_credentials():
     return True
 
 
-def show_menu():
+def show_menu():  # pylint: disable=too-many-branches
     print("\nOptions:")
     print("  1. Scrape all series")
     print("  2. Scrape only NEW series")
@@ -182,17 +185,17 @@ def _check_checkpoint(expected_mode):
                 pass
             return {'ok': True, 'resume': False}
         return {'ok': False, 'resume': False}
-    else:
-        print(f"\n⚠ A checkpoint exists from a different mode: \"{saved_label}\"")
-        print(f"   You are about to run: \"{expected_label}\"\n")
-        discard = input("Discard the old checkpoint and continue? (y/n): ").strip().lower()
-        if discard == 'y':
-            try:
-                os.remove(checkpoint_file)
-            except OSError:
-                pass
-            return {'ok': True, 'resume': False}
-        return {'ok': False, 'resume': False}
+
+    print(f"\n⚠ A checkpoint exists from a different mode: \"{saved_label}\"")
+    print(f"   You are about to run: \"{expected_label}\"\n")
+    discard = input("Discard the old checkpoint and continue? (y/n): ").strip().lower()
+    if discard == 'y':
+        try:
+            os.remove(checkpoint_file)
+        except OSError:
+            pass
+        return {'ok': True, 'resume': False}
+    return {'ok': False, 'resume': False}
 
 
 def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg):
@@ -232,7 +235,7 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg):
 
         return scraper
     except (KeyboardInterrupt, SystemExit):
-        print(f"\n⚠ Scraping interrupted by Ctrl+C")
+        print("\n⚠ Scraping interrupted by Ctrl+C")
         if 'scraper' in locals() and scraper.series_data:
             if confirm_and_save_changes(scraper.series_data, description):
                 print(f"\n✓ Partial data saved ({len(scraper.series_data)} series)")
@@ -270,7 +273,7 @@ def scrape_all_series():
     use_parallel = mode_choice != '1'
 
     _run_scrape_and_save(
-        run_kwargs=dict(resume_only=resume, parallel=use_parallel),
+        run_kwargs={'resume_only': resume, 'parallel': use_parallel},
         description="All series scrape",
         success_msg="Scraping completed and saved!",
         no_data_msg="No series data scraped",
@@ -286,7 +289,7 @@ def scrape_new_series():
         return
 
     _run_scrape_and_save(
-        run_kwargs=dict(new_only=True, resume_only=chk['resume']),
+        run_kwargs={'new_only': True, 'resume_only': chk['resume']},
         description="New series data",
         success_msg="New series scraping completed successfully!",
         no_data_msg="No new series found",
@@ -306,7 +309,7 @@ def scrape_unwatched():
     skipped = 0
     for series in index_manager.series_index.values():
         total, watched = get_episode_counts(series)
-        if total > 0 and watched >= total:
+        if 0 < total <= watched:
             skipped += 1
         else:
             url = series.get('url')
@@ -336,7 +339,7 @@ def scrape_unwatched():
     use_parallel = mode_choice != '1'
 
     _run_scrape_and_save(
-        run_kwargs=dict(url_list=unwatched_urls, resume_only=resume, parallel=use_parallel),
+        run_kwargs={'url_list': unwatched_urls, 'resume_only': resume, 'parallel': use_parallel},
         description=f"Unwatched series scrape ({len(unwatched_urls)} series)",
         success_msg=f"Unwatched series scraping completed! ({len(unwatched_urls)} series)",
         no_data_msg="No data scraped",
@@ -348,10 +351,10 @@ def single_or_batch_add():
     print("\n→ Add single link / batch from file")
     print("  • Paste URL → scrapes single series")
     print("  • Enter filename → uses that file for batch")
-    print(f"  • Press Enter → uses default (series_urls.txt)")
+    print("  • Press Enter → uses default (series_urls.txt)")
     print("  • Type 0   → back to main menu\n")
 
-    user_input = input(f"Enter [default: series_urls.txt]: ").strip()
+    user_input = input("Enter [default: series_urls.txt]: ").strip()
 
     if user_input == '0':
         return
@@ -375,7 +378,7 @@ def add_single_series(url):
         return
 
     _run_scrape_and_save(
-        run_kwargs=dict(single_url=url, parallel=False),
+        run_kwargs={'single_url': url, 'parallel': False},
         description="Single series",
         success_msg="Series added/updated successfully!",
         no_data_msg="No data scraped for this series",
@@ -433,7 +436,7 @@ def batch_add_from_file(file_path):
     print(f"\n→ Starting batch scraper for {len(urls)} series...\n")
 
     _run_scrape_and_save(
-        run_kwargs=dict(url_list=urls, resume_only=chk['resume'], parallel=True),
+        run_kwargs={'url_list': urls, 'resume_only': chk['resume'], 'parallel': True},
         description=f"Batch add ({len(urls)} series)",
         success_msg=f"Batch add completed! {len(urls)} series processed.",
         no_data_msg="No data scraped",
@@ -483,7 +486,7 @@ def _print_report_summary(report, report_file, filter_name=None):
     waiting_count = report['categories']['waiting_for_new_episodes']['count']
 
     header = f"REPORT SUMMARY ({filter_name.upper().replace('_', ' ')}):" if filter_name else "REPORT SUMMARY:"
-    print(f"\n" + "-"*70)
+    print("\n" + "-"*70)
     print(header)
     print("-"*70)
     print(f"  Total series:        {stats['total_series']}")
@@ -504,7 +507,7 @@ def _print_report_summary(report, report_file, filter_name=None):
     dist = stats.get('completion_distribution', {})
     if dist:
         parts = [f"{k}: {v}" for k, v in dist.items()]
-        print(f"\n  Completion Distribution:")
+        print("\n  Completion Distribution:")
         print(f"    {'  |  '.join(parts)}")
 
     most = stats.get('most_completed_series', [])
@@ -613,7 +616,7 @@ def scrape_subscribed_watchlist():
     resume = chk['resume']
 
     _run_scrape_and_save(
-        run_kwargs=dict(account_source=source, resume_only=resume, parallel=True),
+        run_kwargs={'account_source': source, 'resume_only': resume, 'parallel': True},
         description=f"Account series ({source})",
         success_msg=f"Account series scraping completed! ({source})",
         no_data_msg="No series found on your account pages",
@@ -637,7 +640,7 @@ def retry_failed_series():
         return
 
     _run_scrape_and_save(
-        run_kwargs=dict(retry_failed=True, parallel=False, resume_only=chk['resume']),
+        run_kwargs={'retry_failed': True, 'parallel': False, 'resume_only': chk['resume']},
         description="Retry data",
         success_msg="Retry completed successfully!",
         no_data_msg="No data from retry",
@@ -674,7 +677,7 @@ def main():
         show_menu()
         choice = input("Enter your choice (1-9): ").strip()
 
-        if not choice.isdigit() or not (1 <= int(choice) <= 9):
+        if not choice.isdigit() or not 1 <= int(choice) <= 9:
             print("✗ Invalid choice. Please enter a number between 1 and 9.")
             continue
 
