@@ -688,12 +688,34 @@ def confirm_and_save_changes(new_data, description="data"):
                 print("  Remove ep0 & mark ignored:")
                 for title in sorted(housekeeping['added']):
                     seasons = ', '.join(housekeeping['added'][title])
-                    print(f"    • {title}  [S{seasons}]")
+                    series = new_dict.get(title, {})
+                    watched = series.get('watched_episodes', 0)
+                    total_ep = series.get('total_episodes', 0)
+                    sub = series.get('subscribed')
+                    wl = series.get('watchlist')
+                    parts = []
+                    if sub is not None:
+                        parts.append(f"Sub:{'✓' if sub else '✗'}")
+                    if wl is not None:
+                        parts.append(f"WL:{'✓' if wl else '✗'}")
+                    sub_info = f" ({' '.join(parts)})" if parts else ""
+                    print(f"    • {title}  [{seasons}]: {watched}/{total_ep} watched{sub_info}")
             if housekeeping['removed']:
                 print("  Unmark ignored (ep0 no longer present):")
                 for title in sorted(housekeeping['removed']):
                     seasons = ', '.join(housekeeping['removed'][title])
-                    print(f"    • {title}  [S{seasons}]")
+                    series = new_dict.get(title, {})
+                    watched = series.get('watched_episodes', 0)
+                    total_ep = series.get('total_episodes', 0)
+                    sub = series.get('subscribed')
+                    wl = series.get('watchlist')
+                    parts = []
+                    if sub is not None:
+                        parts.append(f"Sub:{'✓' if sub else '✗'}")
+                    if wl is not None:
+                        parts.append(f"WL:{'✓' if wl else '✗'}")
+                    sub_info = f" ({' '.join(parts)})" if parts else ""
+                    print(f"    • {title}  [{seasons}]: {watched}/{total_ep} watched{sub_info}")
             print(f"{'─'*70}")
             if input("Apply these changes? (y/n): ").strip().lower() != 'y':
                 print("✗ Changes discarded.")
@@ -874,11 +896,25 @@ class IndexManager:
         if filter_watchlist is not None:
             series_progress = [s for s in series_progress if s['watchlist'] == filter_watchlist]
 
-        watched_series = [s for s in series_progress if not s['is_incomplete']]
-        ongoing_series = [s for s in series_progress if s['is_incomplete'] and s['watched_episodes'] > 0]
-        not_started_series = [s for s in series_progress if s['is_incomplete'] and s['watched_episodes'] == 0]
+        watched_series = [
+            s for s in series_progress
+            if not s['is_incomplete'] and s.get('subscribed')
+        ]
+        waiting_for_new = [
+            s for s in series_progress
+            if not s['is_incomplete'] and s.get('watchlist')
+        ]
+        ongoing_series = [
+            s for s in series_progress
+            if s['is_incomplete'] and s['watched_episodes'] > 0
+        ]
+        not_started_series = [
+            s for s in series_progress
+            if s['watched_episodes'] == 0
+        ]
         
         ongoing_sorted = sorted(ongoing_series, key=lambda x: x['completion'], reverse=True)
+        waiting_sorted = sorted(waiting_for_new, key=lambda x: x['title'])
         ongoing_titles = [s['title'] for s in ongoing_sorted]
         not_started_titles = sorted([s['title'] for s in not_started_series])
         
@@ -912,6 +948,15 @@ class IndexManager:
                     "details": [{"title": s['title'], "completion": s['completion'], 
                                "progress": f"{s['watched_episodes']}/{s['total_episodes']}"}
                               for s in ongoing_sorted[:20]]
+                },
+                "waiting_for_new_episodes": {
+                    "count": len(waiting_for_new),
+                    "titles": [s['title'] for s in waiting_sorted],
+                    "details": [{"title": s['title'],
+                                 "progress": f"{s['watched_episodes']}/{s['total_episodes']}",
+                                 "subscribed": s['subscribed'],
+                                 "watchlist": s['watchlist']}
+                                for s in waiting_sorted],
                 },
                 "not_started": {
                     "count": len(not_started_series),

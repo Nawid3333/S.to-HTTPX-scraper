@@ -80,7 +80,7 @@ def print_completed_series_alerts(index_manager=None):
             subscribed = s.get('subscribed', False)
             watchlist = s.get('watchlist', False)
 
-            if total > 0 and watched == total and not subscribed and not watchlist:
+            if total > 0 and watched == total and not subscribed:
                 completed_not_sub.append(s)
             elif total > 0 and 0 < watched < total and not watchlist:
                 ongoing_no_wl.append(s)
@@ -428,6 +428,7 @@ def _print_report_summary(report, report_file, filter_name=None):
     stats = report['metadata']['statistics']
     ongoing_count = report['categories']['ongoing']['count']
     not_started_count = report['categories']['not_started']['count']
+    waiting_count = report['categories']['waiting_for_new_episodes']['count']
 
     header = f"REPORT SUMMARY ({filter_name.upper().replace('_', ' ')}):" if filter_name else "REPORT SUMMARY:"
     print(f"\n" + "-"*70)
@@ -436,6 +437,8 @@ def _print_report_summary(report, report_file, filter_name=None):
     print(f"  Total series:        {stats['total_series']}")
     print(f"  Completed (100%):    {stats.get('completed_count', stats['watched'])}")
     print(f"  Ongoing (started):   {stats.get('ongoing_count', ongoing_count)}")
+    if waiting_count > 0:
+        print(f"  Waiting for new eps: {waiting_count}")
     print(f"  Not started (0%):    {stats.get('not_started_count', not_started_count)}")
     print(f"  Total episodes:      {stats['total_episodes']}")
     print(f"  Watched episodes:    {stats['watched_episodes']}")

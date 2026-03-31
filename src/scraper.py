@@ -35,6 +35,20 @@ _SERIE_SLUG_RE = re.compile(r'^/serie/([^/?#]+)/?$')
 _UTILITY_PAGES = {'alle serien', 'andere serien', 'beliebte serien',
                   'neue serien', 'empfehlung', 'meistgesehen', 'serien'}
 
+# Error page detection — matches titles like "404", "404 Nicht gefunden",
+# "Error 404", "502 Bad Gateway", but NOT series names containing digits.
+_ERROR_TITLE_RE = re.compile(
+    r'^(?:Error\s+)?(?P<code>\d{3})\b|\b(?:Error|Fehler)\s+(?P<code2>\d{3})\b',
+    re.IGNORECASE,
+)
+_SERVER_ERROR_CODES = {'429', '500', '502', '503', '504'}
+
+
+def _is_logged_in(html: str) -> bool:
+    """Check if the page indicates a logged-in session."""
+    soup = BeautifulSoup(html, "html.parser")
+    return soup.select_one("form[action='/logout']") is not None
+
 
 # ── HTML helpers ────────────────────────────────────────────────────────────
 
@@ -79,12 +93,14 @@ def _parse_episodes(html: str) -> list[dict]:
             if cols:
                 ep_num = cols[0].get_text(strip=True)
         if not ep_num:
-            ep_num = str(idx)
+            logger.warning(f"Could not determine episode number for row {idx}")
+            return None
 
         try:
             ep_num_int = int(ep_num)
         except ValueError:
-            ep_num_int = idx
+            logger.warning(f"Non-numeric episode number '{ep_num}' in row {idx}")
+            return None
 
         # Extract titles (German and English)
         ger_cell = row.select_one(".episode-title-ger")
@@ -171,6 +187,34 @@ def _extract_season_links(html: str, series_slug: str) -> list[tuple[str, str]]:
     return links
 
 
+def _check_error_page(html: str) -> str | None:
+    """Detect HTTP error pages (404, 502, etc.) returned as HTML.
+
+    Returns an error string like '404' if an error page is detected, None otherwise.
+    Uses <title>, <h2> content + absence of season nav pills to distinguish
+    real error pages from series that happen to contain numbers in their name.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    # If the page has series content (season nav pills), it's a real series page
+    if soup.select_one("a[data-season-pill]") or soup.select_one('a[href*="/staffel-"]'):
+        return None
+    # Check <title> for error patterns
+    title_tag = soup.find("title")
+    if title_tag:
+        title_text = title_tag.get_text(strip=True)
+        m = _ERROR_TITLE_RE.search(title_text)
+        if m:
+            code = m.group("code") or m.group("code2")
+            return code
+    # Check for <h2>404</h2> (exact match, safe from series names)
+    h2_tag = soup.find("h2")
+    if h2_tag and h2_tag.get_text(strip=True).isdigit():
+        code = h2_tag.get_text(strip=True)
+        if len(code) == 3:
+            return code
+    return None
+
+
 def _extract_title(html: str) -> str | None:
     """Extract series title from the page.
 
@@ -225,6 +269,31 @@ def _detect_subscription_status(html: str) -> tuple[bool | None, bool | None]:
             watchlist = bool(is_active)
 
     return (subscribed, watchlist)
+
+
+def _extract_alt_titles(data_search: str, main_title: str) -> list[str]:
+    """Extract alternative titles from a data-search attribute.
+
+    The attribute contains comma-separated search terms.  One of them matches
+    the main title (lowercase); others may have the main title as a prefix
+    followed by an alternative name.
+    """
+    if not data_search:
+        return []
+    parts = [p.strip() for p in data_search.split(",") if p.strip()]
+    main_lower = main_title.lower().strip()
+    alt_titles: list[str] = []
+    for part in parts:
+        part_lower = part.lower()
+        if part_lower == main_lower:
+            continue
+        if part_lower.startswith(main_lower + " "):
+            alt = part[len(main_lower):].strip()
+            if alt:
+                alt_titles.append(alt)
+        else:
+            alt_titles.append(part)
+    return alt_titles
 
 
 # ── Exception ───────────────────────────────────────────────────────────────
@@ -403,6 +472,15 @@ class SToScraper:
             pass
         return []
 
+    def save_ignored_seasons(self, ignored: list[dict]):
+        tmp = self.ignored_seasons_file + '.tmp'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(ignored, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, self.ignored_seasons_file)
+        except Exception as e:
+            logger.error(f"Failed to save ignored seasons: {e}")
+
     def get_ignored_seasons_set(self) -> set[tuple[str, str]]:
         """Return set of (slug, season) tuples that have episode 0 ignored."""
         return {(e.get('slug', ''), str(e.get('season', ''))) for e in self.load_ignored_seasons()} - {('', '')}
@@ -511,6 +589,8 @@ class SToScraper:
     async def _get_all_series(self, client: httpx.AsyncClient) -> list[dict]:
         """Fetch the full series catalogue from s.to/serien."""
         resp = await client.get(SERIES_LIST_URL)
+        if not _is_logged_in(resp.text):
+            raise RuntimeError("Not logged in — cannot fetch series catalogue")
         soup = BeautifulSoup(resp.text, "html.parser")
         series, seen_slugs = [], set()
         for a in soup.find_all("a", href=True):
@@ -533,11 +613,17 @@ class SToScraper:
             if slug in seen_slugs:
                 continue
             seen_slugs.add(slug)
-            series.append({
+            entry = {
                 "title": title,
                 "link": f"/serie/{slug}",
                 "url": f"{SITE_URL}/serie/{slug}",
-            })
+            }
+            parent_li = a.find_parent("li", class_="series-item")
+            if parent_li:
+                alt = _extract_alt_titles(parent_li.get("data-search", ""), title)
+                if alt:
+                    entry["alt_titles"] = alt
+            series.append(entry)
         return series
 
     async def _get_account_series(self, client: httpx.AsyncClient,
@@ -569,6 +655,9 @@ class SToScraper:
                 except httpx.HTTPError as e:
                     logger.warning(f"Could not fetch {url}: {e}")
                     break
+
+                if not _is_logged_in(resp.text):
+                    raise RuntimeError(f"Not logged in — cannot fetch {label} page")
 
                 soup = BeautifulSoup(resp.text, "html.parser")
                 page_found = 0
@@ -618,6 +707,21 @@ class SToScraper:
             return self._error_result(info, str(e))
 
         html = resp.text
+
+        # Detect error pages (404, 502, etc.) before parsing content
+        error_code = _check_error_page(html)
+        if error_code:
+            reason = f"{error_code} error page"
+            if error_code in _SERVER_ERROR_CODES:
+                reason = f"{error_code} server error"
+            logger.warning(f"Error page detected for {url}: {error_code}")
+            return self._error_result(info, reason)
+
+        # Verify still logged in
+        if not _is_logged_in(html):
+            logger.error(f"Session expired while scraping {url}")
+            return self._error_result(info, "session expired — not logged in")
+
         title = _extract_title(html) or info.get("title", slug)
         if title.lower().strip() in _UTILITY_PAGES:
             return self._error_result(info, "utility page")
@@ -627,8 +731,7 @@ class SToScraper:
 
         season_links = _extract_season_links(html, slug)
         if not season_links:
-            # Default to season 1 if no nav found
-            season_links = [("1", url)]
+            return self._error_result(info, "no seasons found")
 
         seasons_data = []
         total_watched, total_eps = 0, 0
@@ -639,9 +742,11 @@ class SToScraper:
         for label, season_url in season_links:
             try:
                 sr = await client.get(season_url, follow_redirects=True)
-            except httpx.HTTPError:
-                continue
+            except httpx.HTTPError as e:
+                return self._error_result(info, f"season {label} fetch failed: {e}")
             episodes = _parse_episodes(sr.text)
+            if episodes is None:
+                return self._error_result(info, f"season {label} episode parse failed")
 
             ep0_exists = any(ep["number"] == 0 for ep in episodes)
             is_ignored = (slug, label) in ignored_seasons
@@ -654,7 +759,12 @@ class SToScraper:
                 has_episode_zero = True
             elif not ep0_exists and is_ignored:
                 # Stale: episode 0 no longer exists but still in ignored list
-                stale_ignored.append({"slug": slug, "season": label})
+                stale_ignored.append({
+                    "slug": slug,
+                    "season": label,
+                    "url": f"{SITE_URL}/serie/{slug}",
+                    "title": title,
+                })
 
             watched_count = sum(1 for ep in episodes if ep["watched"])
             total_count = len(episodes)
@@ -683,6 +793,8 @@ class SToScraper:
             "watchlist": watchlist,
             "seasons": seasons_data,
         }
+        if info.get("alt_titles"):
+            result["alt_titles"] = info["alt_titles"]
         if has_episode_zero:
             result["_has_episode_zero"] = True
         if stale_ignored:
@@ -762,6 +874,7 @@ class SToScraper:
                                     "title": result.get("title", ""),
                                     "slug": entry["slug"],
                                     "season": entry["season"],
+                                    "url": entry.get("url", info.get("url", "")),
                                 })
 
                 link = info.get("link", "")
@@ -862,13 +975,14 @@ class SToScraper:
         if has_stale:
             print(f"\n⚠ Episode 0 no longer exists for these ignored seasons — consider removing from .ignored_seasons.json:")
             for w in self._stale_ignored_warnings:
-                print(f"  • {w['title']} (season {w['season']}, slug: {w['slug']})")
+                url = w.get('url', f"{SITE_URL}/serie/{w['slug']}")
+                print(f"  • {w['title']} (season {w['season']}) → {url}")
 
         if has_new_ep0:
             new_ep0 = [f for f in self.failed_links if f.get("reason") == "episode_0_placeholder"]
             print(f"\n⚠ New episode 0 detected in {len(new_ep0)} series (added to .failed_series.json):")
             for f in new_ep0:
-                print(f"  • {f.get('title', f.get('url', '?'))}")
+                print(f"  • {f.get('title', '?')} → {f.get('url', '?')}")
 
         answer = input("\nContinue scraping remaining series? (y/n): ").strip().lower()
         if answer != 'y':
@@ -910,7 +1024,9 @@ class SToScraper:
             await tmp.aclose()
             if result["title"].startswith("[ERROR"):
                 self.failed_links.append(info)
-            self.series_data = [result]
+                self.series_data = []
+            else:
+                self.series_data = [result]
             return
 
         if url_list:
@@ -953,8 +1069,10 @@ class SToScraper:
                           if self.get_series_slug_from_url(s.get('link', '')) not in existing_slugs]
             if new_titles:
                 print(f"\nℹ {len(new_titles)} new series detected:")
-                for t in new_titles:
+                for t in new_titles[:10]:
                     print(f"  + {t}")
+                if len(new_titles) > 10:
+                    print(f"  ... and {len(new_titles) - 10} more")
                 print()
 
             # Two-phase scraping: ignored-season series first
@@ -1012,8 +1130,10 @@ class SToScraper:
                       and self.get_series_slug_from_url(s.get('link', '')) not in ignored_slugs]
         if new_titles:
             print(f"\nℹ {len(new_titles)} new series detected:")
-            for t in new_titles:
+            for t in new_titles[:10]:
                 print(f"  + {t}")
+            if len(new_titles) > 10:
+                print(f"  ... and {len(new_titles) - 10} more")
             print()
 
         if ignored_slugs:
@@ -1070,8 +1190,10 @@ class SToScraper:
                 account_source=account_source,
             ))
 
-            # Alert for empty series (0 episodes)
-            empty = [s for s in self.series_data if s.get('total_episodes', 0) == 0]
+            # Alert for empty series (0 episodes) — exclude error results
+            empty = [s for s in self.series_data
+                     if s.get('total_episodes', 0) == 0
+                     and not s.get('title', '').startswith('[ERROR')]
             if empty:
                 print(f"\n⚠ {len(empty)} series with 0 episodes:")
                 for s in empty:
