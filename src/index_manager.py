@@ -454,19 +454,17 @@ def show_changes(changes, include_unwatched=True, include_watched=True, new_data
         unwatched_lines = group_episodes_by_season(changes["newly_unwatched"], new_data, prefix='[!]')
         paginate_list(unwatched_lines, lambda line: line)
 
+    sub_wl_items = []
     if changes.get("subscription_changes"):
-        print(f"\n[SUBSCRIPTION CHANGES] ({len(changes['subscription_changes'])})")
         for title, old_val, new_val in changes["subscription_changes"]:
-            old_str = "subscribed" if old_val else "not subscribed"
-            new_str = "subscribed" if new_val else "not subscribed"
-            print(f"  ~ {title}: {old_str} → {new_str}")
-
+            sub_wl_items.append((title, "Sub", "✓" if old_val else "✗", "✓" if new_val else "✗"))
     if changes.get("watchlist_changes"):
-        print(f"\n[WATCHLIST CHANGES] ({len(changes['watchlist_changes'])})")
         for title, old_val, new_val in changes["watchlist_changes"]:
-            old_str = "on watchlist" if old_val else "not on watchlist"
-            new_str = "on watchlist" if new_val else "not on watchlist"
-            print(f"  ~ {title}: {old_str} → {new_str}")
+            sub_wl_items.append((title, "WL", "✓" if old_val else "✗", "✓" if new_val else "✗"))
+    if sub_wl_items:
+        print(f"\n[SUBSCRIPTION / WATCHLIST CHANGES] ({len(sub_wl_items)})")
+        for item in sub_wl_items:
+            print(f"  ~ {item[0]}: {item[1]}: {item[2]} → {item[3]}")
 
     print("\n" + "="*70)
     return total
@@ -543,27 +541,27 @@ def _prompt_subscription_changes(changes):
     allow_sub = False
     allow_wl = False
 
-    if changes.get("subscription_changes"):
-        print(f"\n[SUBSCRIPTION] {len(changes['subscription_changes'])} series subscription status changed")
-        print("-"*70)
-        for title, old_val, new_val in changes["subscription_changes"]:
-            old_str = "subscribed" if old_val else "not subscribed"
-            new_str = "subscribed" if new_val else "not subscribed"
-            print(f"  ~ {title}: {old_str} → {new_str}")
-        print("-"*70)
-        if input("\nAllow subscription status changes? (y/n): ").strip().lower() == 'y':
-            allow_sub = True
+    has_sub = bool(changes.get("subscription_changes"))
+    has_wl = bool(changes.get("watchlist_changes"))
 
-    if changes.get("watchlist_changes"):
-        print(f"\n[WATCHLIST] {len(changes['watchlist_changes'])} series watchlist status changed")
+    if has_sub or has_wl:
+        total = len(changes.get("subscription_changes", [])) + len(changes.get("watchlist_changes", []))
+        print(f"\n[SUBSCRIPTION / WATCHLIST CHANGES] ({total})")
         print("-"*70)
-        for title, old_val, new_val in changes["watchlist_changes"]:
-            old_str = "on watchlist" if old_val else "not on watchlist"
-            new_str = "on watchlist" if new_val else "not on watchlist"
-            print(f"  ~ {title}: {old_str} → {new_str}")
+        if has_sub:
+            for title, old_val, new_val in changes["subscription_changes"]:
+                old_str = "✓" if old_val else "✗"
+                new_str = "✓" if new_val else "✗"
+                print(f"  ~ {title}: Sub: {old_str} → {new_str}")
+        if has_wl:
+            for title, old_val, new_val in changes["watchlist_changes"]:
+                old_str = "✓" if old_val else "✗"
+                new_str = "✓" if new_val else "✗"
+                print(f"  ~ {title}: WL: {old_str} → {new_str}")
         print("-"*70)
-        if input("\nAllow watchlist status changes? (y/n): ").strip().lower() == 'y':
-            allow_wl = True
+        if input("\nAllow subscription/watchlist changes? (y/n): ").strip().lower() == 'y':
+            allow_sub = has_sub
+            allow_wl = has_wl
 
     return allow_sub, allow_wl
 
