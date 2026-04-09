@@ -214,6 +214,10 @@ def _check_error_page(html: str) -> str | None:
         code = h2_tag.get_text(strip=True)
         if len(code) == 3:
             return code
+    # s.to-specific fallback: <p> containing "nicht gefunden" on an otherwise empty page
+    p_tag = soup.find("p")
+    if p_tag and 'nicht gefunden' in p_tag.get_text(strip=True).lower():
+        return '404'
     return None
 
 
@@ -396,6 +400,9 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     def save_failed_series(self):
         with self._lock:
+            ignored_urls = {
+                s.get('url') for s in self.load_ignored_series()
+            }
             existing = []
             try:
                 if os.path.exists(self.failed_file):
@@ -403,9 +410,15 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                         existing = json.load(f)
             except Exception:
                 pass
+            # Drop any entries already on the ignore list
+            existing = [
+                e for e in existing
+                if isinstance(e, dict) and e.get('url') not in ignored_urls
+            ]
             seen = {e.get('url') for e in existing if isinstance(e, dict)}
             for f in self.failed_links:
-                if isinstance(f, dict) and f.get('url') not in seen:
+                if (isinstance(f, dict) and f.get('url') not in seen
+                        and f.get('url') not in ignored_urls):
                     existing.append(f)
                     seen.add(f.get('url'))
             tmp = self.failed_file + '.tmp'
@@ -460,6 +473,129 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     def get_ignored_slugs(self) -> set[str]:
         return {self.get_series_slug_from_url(s.get('url', '')) for s in self.load_ignored_series()} - {'unknown'}
+
+    async def _revalidate_ignored_series(self, client: httpx.AsyncClient):
+        """Re-check ignored series to see if they are still empty/404.
+
+        Notification-only — does not auto-remove entries.  Prints a warning
+        for any series that now appears to have content so the user can
+        manually remove it from .ignored_series.json.
+        """
+        ignored = self.load_ignored_series()
+        if not ignored:
+            return
+
+        print(f"→ Re-checking {len(ignored)} ignored series...")
+        now_available = 0
+        still_empty = 0
+
+        for entry in ignored:
+            url = entry.get('url', '')
+            title = entry.get('title', url.split('/')[-1])
+            try:
+                resp = await client.get(url, follow_redirects=True)
+                html = resp.text
+                error_code = _check_error_page(html)
+                if error_code:
+                    still_empty += 1
+                    print(f"  ✓ {title}: still empty ({error_code} — ignored)")
+                else:
+                    # Check if page actually has season content
+                    soup = BeautifulSoup(html, "html.parser")
+                    has_seasons = (
+                        soup.select_one("a[data-season-pill]")
+                        or soup.select_one('a[href*="/staffel-"]')
+                    )
+                    if has_seasons:
+                        now_available += 1
+                        print(f"  ⚠ {title}: now available! Consider removing from .ignored_series.json")
+                    else:
+                        still_empty += 1
+                        print(f"  ✓ {title}: still empty (no seasons — ignored)")
+            except httpx.HTTPError as e:
+                still_empty += 1
+                print(f"  ✓ {title}: still unreachable ({e} — ignored)")
+
+        print(f"→ Re-checked {len(ignored)} ignored: "
+              f"{now_available} now available, {still_empty} still empty")
+
+    def _check_ignored_vs_catalog(self, all_series: list[dict]):
+        """Compare ignored series against the fetched catalog.
+
+        Notification-only — prints which ignored series are still in the
+        catalog and which have disappeared so the user can clean up
+        .ignored_series.json manually.
+        """
+        ignored = self.load_ignored_series()
+        if not ignored:
+            return
+
+        catalog_slugs = {
+            self.get_series_slug_from_url(s.get('link', ''))
+            for s in all_series
+        } - {'unknown'}
+
+        in_catalog = []
+        disappeared = []
+        for entry in ignored:
+            slug = self.get_series_slug_from_url(entry.get('url', ''))
+            title = entry.get('title', slug)
+            if slug in catalog_slugs:
+                in_catalog.append(title)
+            else:
+                disappeared.append(title)
+
+        if disappeared:
+            print(f"\n⚠ {len(disappeared)} ignored series no longer in catalog"
+                  " — consider removing from .ignored_series.json:")
+            for t in disappeared:
+                print(f"  ✕ {t}")
+        if in_catalog:
+            print(f"ℹ {len(in_catalog)} ignored series still listed in catalog (skipped)")
+        print()
+
+    def _check_index_vs_catalog(self, all_series: list[dict]):
+        """Detect indexed series that have disappeared from the catalog.
+
+        Notification-only — prints which indexed series are no longer in
+        the fetched catalog so the user can decide to keep or remove them.
+        """
+        catalog_slugs = {
+            self.get_series_slug_from_url(s.get('link', ''))
+            for s in all_series
+        } - {'unknown'}
+
+        # Build slug→title map from the index
+        index_map: dict[str, str] = {}
+        try:
+            if os.path.exists(SERIES_INDEX_FILE):
+                with open(SERIES_INDEX_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                items = data if isinstance(data, list) else list(data.values())
+                for item in items:
+                    url = item.get('url', '') or item.get('link', '')
+                    slug = self.get_series_slug_from_url(url)
+                    if slug != 'unknown':
+                        index_map[slug] = item.get('title', slug)
+        except Exception:
+            return
+
+        if not index_map:
+            return
+
+        vanished = [
+            (slug, title) for slug, title in index_map.items()
+            if slug not in catalog_slugs
+        ]
+
+        if vanished:
+            print(f"\n⚠ {len(vanished)} indexed series no longer in catalog — may have been removed from the site:")
+            for slug, title in vanished[:20]:
+                print(f"  ✕ {title}  ({slug})")
+            if len(vanished) > 20:
+                print(f"  ... and {len(vanished) - 20} more")
+            print("  → Review series_index.json and decide whether to keep or remove these entries.")
+            print()
 
     # ── Ignored seasons management ──────────────────────────────────────────
 
@@ -847,11 +983,14 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 result = await self._scrape_one_series(client, info)
 
                 if result["title"].startswith("[ERROR"):
+                    # Extract actual error reason from "[ERROR: reason]"
+                    raw = result["title"]
+                    reason = raw[8:-1] if raw.startswith("[ERROR: ") and raw.endswith("]") else "scrape_error"
                     self.failed_links.append({
                         "url": info["url"],
                         "title": info.get("title", ""),
                         "link": info.get("link", ""),
-                        "reason": "scrape_error",
+                        "reason": reason,
                     })
                 elif result.get("total_episodes", 0) == 0:
                     results.append(result)
@@ -1073,6 +1212,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
         if account_source:
             self._checkpoint_mode = account_source
+            await self._revalidate_ignored_series(tmp)
             print(f"→ Fetching {account_source} series from account pages...")
             account_series = await self._get_account_series(tmp, source=account_source)
             await tmp.aclose()
@@ -1118,10 +1258,13 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
         if new_only:
             self._checkpoint_mode = 'new_only'
+            await self._revalidate_ignored_series(tmp)
             print("→ Fetching series list...")
             all_series = await self._get_all_series(tmp)
             await tmp.aclose()
             self.all_discovered_series = all_series
+            self._check_ignored_vs_catalog(all_series)
+            self._check_index_vs_catalog(all_series)
             existing_slugs = self.load_existing_slugs()
             ignored_slugs = self.get_ignored_slugs()
             new_list = [s for s in all_series
@@ -1139,12 +1282,15 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
         # Default: scrape all
         self._checkpoint_mode = 'all_series'
+        await self._revalidate_ignored_series(tmp)
         print("→ Fetching series list...")
         all_series = await self._get_all_series(tmp)
         await tmp.aclose()
         self.all_discovered_series = all_series
         ignored_slugs = self.get_ignored_slugs()
         print(f"✓ Found {len(all_series)} series")
+        self._check_ignored_vs_catalog(all_series)
+        self._check_index_vs_catalog(all_series)
 
         # New series detection
         existing_slugs = self.load_existing_slugs()
