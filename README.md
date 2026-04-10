@@ -155,6 +155,10 @@ When ignored-season series are found in a scrape, they are processed first (two-
     └── s_to_backup.log         # Rotating log file
 ```
 
+## Author
+
+Nawid Salehie
+
 ## License
 
 Private project — not licensed for redistribution.
