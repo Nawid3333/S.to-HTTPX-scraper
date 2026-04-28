@@ -645,6 +645,74 @@ def _prompt_watch_status_changes(changes, new_dict):
     return allow_watched, allow_unwatched
 
 
+def _format_subscription_changes(changes):
+    """Format subscription/watchlist changes into separated Added/Removed sections.
+    
+    Returns a formatted string with sections for:
+    - Subscriptions Added
+    - Subscriptions Removed
+    - Watchlist Added
+    - Watchlist Removed
+    """
+    output = []
+    
+    # Separate subscription changes
+    subs_added = []
+    subs_removed = []
+    for title, old_val, new_val in changes.get("subscription_changes", []):
+        if not old_val and new_val:  # False -> True
+            subs_added.append(title)
+        elif old_val and not new_val:  # True -> False
+            subs_removed.append(title)
+    
+    # Separate watchlist changes
+    wl_added = []
+    wl_removed = []
+    for title, old_val, new_val in changes.get("watchlist_changes", []):
+        if not old_val and new_val:  # False -> True
+            wl_added.append(title)
+        elif old_val and not new_val:  # True -> False
+            wl_removed.append(title)
+    
+    # Display subscriptions section
+    if subs_added or subs_removed:
+        output.append(f"[SUBSCRIPTIONS - ADDED] ({len(subs_added)})")
+        output.append("   " + "─"*66)
+        if subs_added:
+            for title in sorted(subs_added):
+                output.append(f"  + {title}")
+        else:
+            output.append("  (none)")
+        
+        output.append(f"\n[SUBSCRIPTIONS - REMOVED] ({len(subs_removed)})")
+        output.append("   " + "─"*66)
+        if subs_removed:
+            for title in sorted(subs_removed):
+                output.append(f"  - {title}")
+        else:
+            output.append("  (none)")
+    
+    # Display watchlist section
+    if wl_added or wl_removed:
+        output.append(f"\n[WATCHLIST - ADDED] ({len(wl_added)})")
+        output.append("   " + "─"*66)
+        if wl_added:
+            for title in sorted(wl_added):
+                output.append(f"  + {title}")
+        else:
+            output.append("  (none)")
+        
+        output.append(f"\n[WATCHLIST - REMOVED] ({len(wl_removed)})")
+        output.append("   " + "─"*66)
+        if wl_removed:
+            for title in sorted(wl_removed):
+                output.append(f"  - {title}")
+        else:
+            output.append("  (none)")
+    
+    return "\n".join(output)
+
+
 def _prompt_subscription_changes(changes):
     """Prompt user to confirm subscription/watchlist changes."""
     allow_sub = False
@@ -655,18 +723,10 @@ def _prompt_subscription_changes(changes):
 
     if has_sub or has_wl:
         total = len(changes.get("subscription_changes", [])) + len(changes.get("watchlist_changes", []))
+        formatted_changes = _format_subscription_changes(changes)
         print(f"\n[SUBSCRIPTION / WATCHLIST CHANGES] ({total})")
         print("-"*70)
-        if has_sub:
-            for title, old_val, new_val in changes["subscription_changes"]:
-                old_str = "✓" if old_val else "✗"
-                new_str = "✓" if new_val else "✗"
-                print(f"  ~ {title}: Sub: {old_str} → {new_str}")
-        if has_wl:
-            for title, old_val, new_val in changes["watchlist_changes"]:
-                old_str = "✓" if old_val else "✗"
-                new_str = "✓" if new_val else "✗"
-                print(f"  ~ {title}: WL: {old_str} → {new_str}")
+        print(formatted_changes)
         print("-"*70)
         if input("\nAllow subscription/watchlist changes? (y/n): ").strip().lower() == 'y':
             allow_sub = has_sub
