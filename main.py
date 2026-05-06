@@ -9,6 +9,7 @@ Supports checkpoint resume, batch URL import, subscription/watchlist tracking,
 and interactive change confirmation.
 """
 
+import copy
 import json
 import logging
 import logging.handlers
@@ -22,13 +23,28 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from config.config import (  # noqa: E402  # pylint: disable=import-error,no-name-in-module,wrong-import-position
-    EMAIL, PASSWORD, DATA_DIR, LOG_FILE,
+    EMAIL, PASSWORD, DATA_DIR, SERIES_INDEX_FILE, LOG_FILE,
 )
 from src.scraper import SToScraper  # noqa: E402  # pylint: disable=wrong-import-position
 from src.index_manager import (  # noqa: E402  # pylint: disable=wrong-import-position
     IndexManager, confirm_and_save_changes, show_vanished_series,
-    get_episode_counts,
+    _extract_slug_from_field, get_episode_counts,
 )
+
+
+def _extract_slug(entry):
+    """Extract series slug from an index entry using link (primary) or url (fallback)."""
+    slug = _extract_slug_from_field(entry.get('link', ''))
+    if slug:
+        return slug
+    slug = _extract_slug_from_field(entry.get('url', ''))
+    if slug:
+        title = entry.get('title', '?')
+        print(f"  ⚠ Used URL fallback for slug extraction: {title}")
+        logger.warning("Used URL fallback for slug extraction: %s", title)
+        return slug
+    return None
+
 
 # Logging
 logging.basicConfig(
@@ -71,7 +87,7 @@ def print_completed_series_alerts(index_manager=None):
     """
     try:
         if index_manager is None:
-            index_manager = IndexManager()
+            index_manager = IndexManager(SERIES_INDEX_FILE)
 
         if not index_manager.series_index:
             return
@@ -91,20 +107,24 @@ def print_completed_series_alerts(index_manager=None):
 
         if completed_not_sub:
             completed_not_sub.sort(key=lambda s: s.get('title', ''))
-            print(f"\n⚠ {len(completed_not_sub)} COMPLETED SERIES — NOT SUBSCRIBED:")
+            print("\n" + "⚠"*35)
+            print(f"⚠ {len(completed_not_sub)} COMPLETED SERIES — NOT SUBSCRIBED:")
             print("─" * 70)
             for s in completed_not_sub:
                 print(f"  • {s.get('title')}")
             print("─" * 70)
             print("  Consider subscribing or leaving as-is.")
+            print("⚠" * 35)
 
             rescrape = input("\nRescrape these series to update Sub/WL status? (y/n): ").strip().lower()
             if rescrape == 'y':
                 urls = [s.get('url') for s in completed_not_sub if s.get('url')]
-                if urls:
-                    print(f"\n→ Rescraping {len(urls)} completed series...\n")
+                if not urls:
+                    print("✗ No URLs found for these series")
+                else:
+                    print(f"\n→ Rescraping {len(urls)} completed series...")
                     _run_scrape_and_save(
-                        run_kwargs={'url_list': urls, 'parallel': False},
+                        run_kwargs={"url_list": urls, "parallel": False},
                         description=f"Rescrape completed series ({len(urls)})",
                         success_msg=f"Rescrape completed! {len(urls)} series updated.",
                         no_data_msg="No data scraped",
@@ -112,15 +132,17 @@ def print_completed_series_alerts(index_manager=None):
 
         if ongoing_no_wl:
             ongoing_no_wl.sort(key=lambda s: s.get('title', ''))
-            print(f"\n⚠ {len(ongoing_no_wl)} ONGOING SERIES — NOT ON WATCHLIST:")
+            print("\n" + "⚠"*35)
+            print(f"⚠ {len(ongoing_no_wl)} ONGOING SERIES — NOT ON WATCHLIST:")
             print("─" * 70)
             for s in ongoing_no_wl:
                 print(f"  • {s.get('title')}")
             print("─" * 70)
             print("  Consider adding them to your watchlist.")
+            print("⚠" * 35)
 
     except Exception as e:
-        logger.error(f"Error printing series alerts: {e}")
+        logger.error("Error printing series alerts: %s", e)
 
 
 def check_disk_space(min_mb=100):
@@ -131,10 +153,11 @@ def check_disk_space(min_mb=100):
         if available_mb < min_mb:
             print("\n✗ WARNING: Low disk space!")
             print(f"  Available: {available_mb:.1f} MB (minimum needed: {min_mb} MB)")
+            print("  Please free up disk space before scraping.\n")
             return False
         return True
     except Exception as e:
-        logger.warning(f"Could not check disk space: {e}")
+        logger.warning("Could not check disk space: %s", e)
         return True
 
 
@@ -198,26 +221,40 @@ def _check_checkpoint(expected_mode):
     return {'ok': False, 'resume': False}
 
 
-def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg):
-    """Create scraper, run, confirm & save. Returns the scraper or None on error."""
+def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
+                         pre_save_hook=None, vanished_scope=None):
+    """Common pattern: create scraper, run, confirm & save, handle errors.
+
+    Args:
+        pre_save_hook: Optional callable(scraper, pre_index) called after scraping
+                       but before confirm_and_save. Can modify scraper.series_data.
+        vanished_scope: Override scope for show_vanished_series (default: auto-detect).
+    """
+    pre_index = IndexManager(SERIES_INDEX_FILE) if pre_save_hook else None
     try:
         scraper = SToScraper()
         scraper.run(**run_kwargs)
 
         if scraper.series_data:
-            if scraper.all_discovered_series is not None:
-                all_slugs = set()
-                for s in scraper.all_discovered_series:
-                    slug = scraper.get_series_slug_from_url(s.get('link', ''))
-                    if slug and slug != 'unknown':
-                        all_slugs.add(slug)
-                scope = 'new_only' if run_kwargs.get('new_only') else 'all'
-                index_manager = IndexManager()
-                show_vanished_series(index_manager.series_index, all_slugs, scope)
+            if pre_save_hook:
+                pre_save_hook(scraper, pre_index)
 
-            if confirm_and_save_changes(scraper.series_data, description):
+            index_manager = IndexManager(SERIES_INDEX_FILE)
+
+            if scraper.all_discovered_series is not None:
+                all_slugs = {_extract_slug(s) for s in scraper.all_discovered_series} - {None}
+                scope = vanished_scope or ('new_only' if run_kwargs.get('new_only') else 'all')
+                vanished_kept = show_vanished_series(
+                    index_manager.series_index, all_slugs, scope,
+                    index_file=SERIES_INDEX_FILE,
+                )
+                if len(vanished_kept) < len(index_manager.series_index):
+                    # Reload index after deletions so confirm_and_save works with clean data
+                    index_manager.load_index()
+
+            if confirm_and_save_changes(scraper.series_data, description, index_manager):
                 print(f"\n✓ {success_msg}")
-                print_completed_series_alerts()
+                print_completed_series_alerts(index_manager)
                 logger.info(success_msg)
         else:
             print(f"\n⚠ {no_data_msg}")
@@ -237,19 +274,20 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg):
     except (KeyboardInterrupt, SystemExit):
         print("\n⚠ Scraping interrupted by Ctrl+C")
         if 'scraper' in locals() and scraper.series_data:
-            if confirm_and_save_changes(scraper.series_data, description):
+            index_manager = IndexManager(SERIES_INDEX_FILE)
+            if confirm_and_save_changes(scraper.series_data, description, index_manager):
                 print(f"\n✓ Partial data saved ({len(scraper.series_data)} series)")
-                logger.info(f"{description} interrupted — partial data saved")
+                logger.info("%s interrupted — partial data saved", description)
         if 'scraper' in locals() and scraper.failed_links:
             print(f"\n⚠ {len(scraper.failed_links)} series failed.")
             print("→ Use option 7 (Retry failed series) to rescrape these later.")
         return scraper if 'scraper' in locals() else None
     except OSError as e:
         print(f"\n✗ Network error occurred: {str(e)}")
-        logger.error(f"Network error in {description}: {e}")
+        logger.error("Network error in %s: %s", description, e)
     except Exception as e:
         print(f"\n✗ Unexpected error: {str(e)}")
-        logger.error(f"Unexpected error in {description}: {e}")
+        logger.error("Unexpected error in %s: %s", description, e)
     return None
 
 
@@ -300,7 +338,7 @@ def scrape_unwatched():
     """Scrape only unwatched/ongoing/unstarted series from the existing index."""
     print("\n→ Scrape unwatched series (skipping fully watched)...\n")
 
-    index_manager = IndexManager()
+    index_manager = IndexManager(SERIES_INDEX_FILE)
     if not index_manager.series_index:
         print("✗ No series in index. Run a full scrape first (option 1).")
         return
@@ -309,7 +347,7 @@ def scrape_unwatched():
     skipped = 0
     for series in index_manager.series_index.values():
         total, watched = get_episode_counts(series)
-        if 0 < total <= watched:
+        if total > 0 and watched >= total:
             skipped += 1
         else:
             url = series.get('url')
@@ -336,10 +374,18 @@ def scrape_unwatched():
 
     if mode_choice == '0':
         return
-    use_parallel = mode_choice != '1'
+    if mode_choice not in ['1', '2']:
+        print("⚠ Invalid choice, using default (parallel)")
+        use_parallel = True
+    else:
+        use_parallel = mode_choice == '2'
 
     _run_scrape_and_save(
-        run_kwargs={'url_list': unwatched_urls, 'resume_only': resume, 'parallel': use_parallel},
+        run_kwargs={
+            'url_list': unwatched_urls,
+            'resume_only': resume,
+            'parallel': use_parallel,
+        },
         description=f"Unwatched series scrape ({len(unwatched_urls)} series)",
         success_msg=f"Unwatched series scraping completed! ({len(unwatched_urls)} series)",
         no_data_msg="No data scraped",
@@ -410,7 +456,7 @@ def batch_add_from_file(file_path):
                 print(f"  ... and {len(skipped) - 5} more")
     except Exception as e:
         print(f"✗ Failed to read file: {str(e)}")
-        logger.error(f"Failed to read file {file_path}: {e}")
+        logger.error("Failed to read file %s: %s", file_path, e)
         return
 
     if not urls:
@@ -418,6 +464,7 @@ def batch_add_from_file(file_path):
         return
 
     print(f"✓ Found {len(urls)} valid URL(s) in file\n")
+    print("URLs to process:")
     for url in urls[:5]:
         print(f"  • {url}")
     if len(urls) > 5:
@@ -432,11 +479,14 @@ def batch_add_from_file(file_path):
     if not chk['ok']:
         print("✗ Cancelled")
         return
+    resume = chk['resume']
 
     print(f"\n→ Starting batch scraper for {len(urls)} series...\n")
 
+    run_kwargs = {'url_list': urls, 'resume_only': resume, 'parallel': True}
+
     _run_scrape_and_save(
-        run_kwargs={'url_list': urls, 'resume_only': chk['resume'], 'parallel': True},
+        run_kwargs=run_kwargs,
         description=f"Batch add ({len(urls)} series)",
         success_msg=f"Batch add completed! {len(urls)} series processed.",
         no_data_msg="No data scraped",
@@ -444,11 +494,13 @@ def batch_add_from_file(file_path):
 
 
 def _show_ongoing_and_export(report, index_manager):
+    """Show ongoing series and offer to export their URLs to series_urls.txt"""
     ongoing_count = report['categories']['ongoing']['count']
     if ongoing_count == 0:
         return
 
-    print(f"\nONGOING SERIES ({ongoing_count}):")
+    print(f"\n{'=' * 70}")
+    print(f"ONGOING SERIES ({ongoing_count}):")
     ongoing_titles = report['categories']['ongoing']['titles']
     for title in ongoing_titles[:10]:
         print(f"  - {title}")
@@ -466,23 +518,27 @@ def _show_ongoing_and_export(report, index_manager):
                     if not url.startswith('http'):
                         url = f"https://s.to{url}"
                     urls.append(url)
+
             if urls:
                 urls_file = os.path.join(os.path.dirname(__file__), 'series_urls.txt')
                 with open(urls_file, 'w', encoding='utf-8') as f:
                     f.write('\n'.join(urls) + '\n')
                 print(f"\n✓ Exported {len(urls)} URLs to series_urls.txt")
-                logger.info(f"Exported {len(urls)} URLs to series_urls.txt")
+                print("  → Use option 5 (Batch add from file) to rescrape these series")
+                logger.info("Exported %d URLs to series_urls.txt", len(urls))
             else:
                 print("\n⚠ Could not extract URLs from ongoing series")
         except Exception as e:
             print(f"\n✗ Failed to export URLs: {str(e)}")
-            logger.error(f"Failed to export URLs: {e}")
+            logger.error("Failed to export URLs: %s", e)
 
 
 def _print_report_summary(report, report_file, filter_name=None):
+    """Print enhanced report summary to console."""
     stats = report['metadata']['statistics']
     ongoing_count = report['categories']['ongoing']['count']
     not_started_count = report['categories']['not_started']['count']
+    not_started_sub_wl_count = report['categories']['not_started_subscribed_watchlist']['count']
     waiting_count = report['categories']['waiting_for_new_episodes']['count']
 
     header = f"REPORT SUMMARY ({filter_name.upper().replace('_', ' ')}):" if filter_name else "REPORT SUMMARY:"
@@ -495,6 +551,8 @@ def _print_report_summary(report, report_file, filter_name=None):
     if waiting_count > 0:
         print(f"  Waiting for new eps: {waiting_count}")
     print(f"  Not started (0%):    {stats.get('not_started_count', not_started_count)}")
+    if not_started_sub_wl_count > 0:
+        print(f"  Not started (Sub/WL):{not_started_sub_wl_count}")
     print(f"  Total episodes:      {stats['total_episodes']}")
     print(f"  Watched episodes:    {stats['watched_episodes']}")
     print(f"  Unwatched episodes:  {stats.get('unwatched_episodes', 0)}")
@@ -512,13 +570,13 @@ def _print_report_summary(report, report_file, filter_name=None):
 
     most = stats.get('most_completed_series', [])
     if most:
-        print(f"\n  Most Completed (top {len(most)}):")
+        print(f"\n  Most Completed Ongoing (top {len(most)}):")
         for i, s in enumerate(most, 1):
             print(f"    {i}. {s['title']} — {s['completion']:.1f}% ({s['progress']})")
 
     least = stats.get('least_completed_series', [])
     if least:
-        print(f"  Least Completed (bottom {len(least)}):")
+        print(f"  Least Completed Ongoing (bottom {len(least)}):")
         for i, s in enumerate(least, 1):
             print(f"    {i}. {s['title']} — {s['completion']:.1f}% ({s['progress']})")
 
@@ -527,17 +585,19 @@ def _print_report_summary(report, report_file, filter_name=None):
 
 
 def generate_report():
+    """Generate series report with optional filtering by subscription status"""
     print("\n→ Generate report")
     print("  1. Full report (all series)")
     print("  2. Subscription/watchlist filtered report")
     print("  0. Back\n")
 
     choice = input("Choose report type (0-2): ").strip()
+
     if choice == '0':
         return
 
     try:
-        index_manager = IndexManager()
+        index_manager = IndexManager(SERIES_INDEX_FILE)
 
         if choice == '1':
             print("\n→ Generating full report...")
@@ -556,17 +616,22 @@ def generate_report():
             print("  2. Only watchlist")
             print("  3. Both")
             print("  0. Back\n")
+
             sub_choice = input("Choose filter (0-3): ").strip()
+
             if sub_choice == '0':
                 return
 
             if sub_choice == '1':
-                report = index_manager.get_full_report(filter_subscribed=True)
+                print("\n→ Generating report for subscribed series...")
+                report = index_manager.get_full_report(filter_subscribed=True, filter_watchlist=False)
                 filter_name = "subscribed_only"
             elif sub_choice == '2':
-                report = index_manager.get_full_report(filter_watchlist=True)
+                print("\n→ Generating report for watchlist series...")
+                report = index_manager.get_full_report(filter_subscribed=False, filter_watchlist=True)
                 filter_name = "watchlist_only"
             elif sub_choice == '3':
+                print("\n→ Generating report for subscribed AND watchlist...")
                 report = index_manager.get_full_report(filter_subscribed=True, filter_watchlist=True)
                 filter_name = "both_subscribed_watchlist"
             else:
@@ -577,18 +642,54 @@ def generate_report():
             with open(report_file, 'w', encoding='utf-8') as f:
                 json.dump(report, f, indent=2, ensure_ascii=False)
             _print_report_summary(report, report_file, filter_name)
-            logger.info(f"Filtered report generated: {filter_name}")
+            logger.info("Filtered report generated: %s", filter_name)
             print_completed_series_alerts(index_manager)
             _show_ongoing_and_export(report, index_manager)
 
         else:
             print("⚠ Invalid choice")
+
     except Exception as e:
         print(f"\n✗ Error generating report: {str(e)}")
-        logger.error(f"Error generating report: {e}")
+        logger.error("Error generating report: %s", e)
+
+
+def _inject_disappeared_series(scraper, pre_index, source):
+    """Inject stubs for series no longer on account pages so merge can prompt."""
+    discovered_slugs = {_extract_slug(s) for s in (scraper.all_discovered_series or [])} - {None}
+    failed_slugs = {_extract_slug(fl) for fl in scraper.failed_links if isinstance(fl, dict)} - {None}
+    scraped_titles = {s.get('title') for s in scraper.series_data if s.get('title')}
+
+    for field, sources in [('watchlist', ('watchlist', 'both')), ('subscribed', ('subscribed', 'both'))]:
+        if source not in sources:
+            continue
+        injected = []
+        for title, entry in pre_index.series_index.items():
+            if not entry.get(field, False):
+                continue
+            slug = _extract_slug(entry)
+            if not slug or slug in discovered_slugs or slug in failed_slugs:
+                continue
+            if title in scraped_titles:
+                # Already scraped — just flip the flag
+                for item in scraper.series_data:
+                    if item.get('title') == title:
+                        item[field] = False
+                        break
+            else:
+                stub = copy.deepcopy(entry)
+                stub[field] = False
+                scraper.series_data.append(stub)
+                scraped_titles.add(title)
+            injected.append(title)
+        if injected:
+            print(f"\n  ⚠ {len(injected)} series no longer {field} (will prompt for confirmation):")
+            for name in injected:
+                print(f"    • {name}")
 
 
 def scrape_subscribed_watchlist():
+    """Scrape subscribed/watchlist series with disappeared-series detection."""
     print("\n→ Scrape subscribed/watchlist series")
     print("  1. Only subscribed")
     print("  2. Only watchlist")
@@ -598,33 +699,35 @@ def scrape_subscribed_watchlist():
     sub_choice = input("Choose source (0-3) [default: 3]: ").strip() or '3'
     if sub_choice == '0':
         return
-
-    if sub_choice == '1':
-        source = 'subscribed'
-    elif sub_choice == '2':
-        source = 'watchlist'
-    elif sub_choice == '3':
-        source = 'both'
-    else:
-        print("⚠ Invalid choice, using default (both)")
-        source = 'both'
+    source = {'1': 'subscribed', '2': 'watchlist'}.get(sub_choice, 'both')
 
     chk = _check_checkpoint(source)
     if not chk['ok']:
         print("✗ Cancelled")
         return
-    resume = chk['resume']
+
+    def _hook(scraper, pre_index):
+        _inject_disappeared_series(scraper, pre_index, source)
 
     _run_scrape_and_save(
-        run_kwargs={'account_source': source, 'resume_only': resume, 'parallel': True},
-        description=f"Account series ({source})",
-        success_msg=f"Account series scraping completed! ({source})",
+        run_kwargs={'account_source': source, 'resume_only': chk['resume']},
+        description="Account series",
+        success_msg="Account series scraping completed!",
         no_data_msg="No series found on your account pages",
+        pre_save_hook=_hook,
+        vanished_scope=source,
     )
 
 
 def retry_failed_series():
+    """Retry previously failed series in sequential mode"""
     print("\n→ Retry failed series from last run\n")
+
+    chk = _check_checkpoint('retry')
+    if not chk['ok']:
+        print("✗ Cancelled")
+        return
+    resume = chk['resume']
 
     temp_scraper = SToScraper()
     failed_list = temp_scraper.load_failed_series()
@@ -632,15 +735,10 @@ def retry_failed_series():
         print("✓ No failed series found. Nothing to retry.")
         return
     print(f"✓ Found {len(failed_list)} failed series from last run")
-    print("→ Starting retry in sequential mode (for reliability)...")
-
-    chk = _check_checkpoint('retry')
-    if not chk['ok']:
-        print("✗ Cancelled")
-        return
+    print("\n→ Starting retry in sequential mode (for reliability)...")
 
     _run_scrape_and_save(
-        run_kwargs={'retry_failed': True, 'parallel': False, 'resume_only': chk['resume']},
+        run_kwargs={'retry_failed': True, 'parallel': False, 'resume_only': resume},
         description="Retry data",
         success_msg="Retry completed successfully!",
         no_data_msg="No data from retry",
@@ -648,19 +746,21 @@ def retry_failed_series():
 
 
 def pause_scraping():
+    """Create a pause file to signal workers to pause scraping"""
     pause_file = os.path.join(DATA_DIR, '.pause_scraping')
     try:
         with open(pause_file, 'w', encoding='utf-8') as f:
             f.write('PAUSE')
         print(f"\n✓ Pause file created: {pause_file}")
         print("Workers will pause at next checkpoint.\n")
-        logger.info(f"Pause file created: {pause_file}")
+        logger.info("Pause file created: %s", pause_file)
     except Exception as e:
         print(f"\n✗ Failed to create pause file: {str(e)}")
-        logger.error(f"Failed to create pause file: {e}")
+        logger.error("Failed to create pause file: %s", e)
 
 
 def main():
+    """Main application loop"""
     print_header()
 
     if not validate_credentials():
@@ -670,8 +770,6 @@ def main():
         response = input("Continue anyway? (y/n): ").strip().lower()
         if response != 'y':
             sys.exit(1)
-
-    print(f"✓ Credentials found for: {EMAIL}\n")
 
     while True:
         show_menu()

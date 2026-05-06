@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 
 from config.config import (  # pylint: disable=import-error,no-name-in-module
     EMAIL, PASSWORD, DATA_DIR, SERIES_INDEX_FILE, NUM_WORKERS,
+    HTTP_REQUEST_TIMEOUT,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ SERIES_LIST_URL = f"{SITE_URL}/serien"
 ACCOUNT_SUBSCRIBED_URL = f"{SITE_URL}/account/subscribed"
 ACCOUNT_WATCHLIST_URL = f"{SITE_URL}/account/watchlist"
 CHECKPOINT_EVERY = 10
-REQUEST_TIMEOUT = 20.0
+REQUEST_TIMEOUT = HTTP_REQUEST_TIMEOUT
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
 _SERIE_PATH_RE = re.compile(r'(/serie/[^/]+)')
@@ -95,13 +96,13 @@ def _parse_episodes(html: str) -> list[dict]:
             if cols:
                 ep_num = cols[0].get_text(strip=True)
         if not ep_num:
-            logger.warning(f"Could not determine episode number for row {idx}")
+            logger.warning("Could not determine episode number for row %d", idx)
             return None
 
         try:
             ep_num_int = int(ep_num)
         except ValueError:
-            logger.warning(f"Non-numeric episode number '{ep_num}' in row {idx}")
+            logger.warning("Non-numeric episode number '%s' in row %d", ep_num, idx)
             return None
 
         # Extract titles (German and English)
@@ -366,7 +367,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                     json.dump(payload, f, ensure_ascii=False)
                 os.replace(tmp, self.checkpoint_file)
             except Exception as e:
-                logger.error(f"Failed to save checkpoint: {e}")
+                logger.error("Failed to save checkpoint: %s", e)
 
     def load_checkpoint(self) -> bool:
         with self._lock:
@@ -385,7 +386,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                     self.completed_links = set(data)
                 return bool(self.completed_links)
             except Exception as e:
-                logger.error(f"Failed to load checkpoint: {e}")
+                logger.error("Failed to load checkpoint: %s", e)
                 return False
 
     def clear_checkpoint(self):
@@ -427,7 +428,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                     json.dump(existing, f_out, indent=2, ensure_ascii=False)
                 os.replace(tmp, self.failed_file)
             except Exception as e:
-                logger.error(f"Failed to save failed series: {e}")
+                logger.error("Failed to save failed series: %s", e)
 
     def load_failed_series(self) -> list:
         with self._lock:
@@ -469,7 +470,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 json.dump(ignored, f, indent=2, ensure_ascii=False)
             os.replace(tmp, self.ignore_file)
         except Exception as e:
-            logger.error(f"Failed to save ignored series: {e}")
+            logger.error("Failed to save ignored series: %s", e)
 
     def get_ignored_slugs(self) -> set[str]:
         return {self.get_series_slug_from_url(s.get('url', '')) for s in self.load_ignored_series()} - {'unknown'}
@@ -617,7 +618,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 json.dump(ignored, f, indent=2, ensure_ascii=False)
             os.replace(tmp, self.ignored_seasons_file)
         except Exception as e:
-            logger.error(f"Failed to save ignored seasons: {e}")
+            logger.error("Failed to save ignored seasons: %s", e)
 
     def get_ignored_seasons_set(self) -> set[tuple[str, str]]:
         """Return set of (slug, season) tuples that have episode 0 ignored."""
@@ -792,7 +793,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 try:
                     resp = await client.get(url, follow_redirects=True)
                 except httpx.HTTPError as e:
-                    logger.warning(f"Could not fetch {url}: {e}")
+                    logger.warning("Could not fetch %s: %s", url, e)
                     break
 
                 if not _is_logged_in(resp.text):
@@ -853,12 +854,12 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             reason = f"{error_code} error page"
             if error_code in _SERVER_ERROR_CODES:
                 reason = f"{error_code} server error"
-            logger.warning(f"Error page detected for {url}: {error_code}")
+            logger.warning("Error page detected for %s: %s", url, error_code)
             return self._error_result(info, reason)
 
         # Verify still logged in
         if not _is_logged_in(html):
-            logger.error(f"Session expired while scraping {url}")
+            logger.error("Session expired while scraping %s", url)
             return self._error_result(info, "session expired — not logged in")
 
         title = _extract_title(html) or info.get("title", slug)
@@ -962,12 +963,12 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         try:
             client = await self._create_logged_in_client()
         except RuntimeError:
-            logger.warning(f"Worker {worker_id} login failed, retrying...")
+            logger.warning("Worker %d login failed, retrying...", worker_id)
             await asyncio.sleep(1)
             try:
                 client = await self._create_logged_in_client()
             except RuntimeError:
-                logger.error(f"Worker {worker_id} login failed permanently")
+                logger.error("Worker %d login failed permanently", worker_id)
                 return
 
         try:
