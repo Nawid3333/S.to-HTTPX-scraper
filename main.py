@@ -252,7 +252,26 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
                     # Reload index after deletions so confirm_and_save works with clean data
                     index_manager.load_index()
 
-            if confirm_and_save_changes(scraper.series_data, description, index_manager):
+            result = confirm_and_save_changes(scraper.series_data, description, index_manager)
+            if isinstance(result, dict) and result.get('rescrape'):
+                # Handle critical data integrity issues: rescrape
+                print(f"\n→ Critical data integrity issues detected!")
+                print(f"  Affected series: {', '.join(result['titles'][:5])}")
+                if len(result['titles']) > 5:
+                    print(f"  ... and {len(result['titles']) - 5} more")
+                
+                confirm = input(f"\nRescrape these {len(result['urls'])} critical series now? (y/n): ").strip().lower()
+                if confirm == 'y':
+                    print(f"\n→ Rescraping {len(result['urls'])} critical series...\n")
+                    _run_scrape_and_save(
+                        run_kwargs={'url_list': result['urls'], 'parallel': False},
+                        description=f"Rescrape critical series ({len(result['urls'])})",
+                        success_msg=f"Critical series rescraping completed! {len(result['urls'])} series updated.",
+                        no_data_msg="No data scraped for critical series",
+                    )
+                else:
+                    print(f"  → Rescraping cancelled. Series will remain deleted from index.")
+            elif result:
                 print(f"\n✓ {success_msg}")
                 print_completed_series_alerts(index_manager)
                 logger.info(success_msg)
@@ -275,7 +294,12 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
         print("\n⚠ Scraping interrupted by Ctrl+C")
         if 'scraper' in locals() and scraper.series_data:
             index_manager = IndexManager(SERIES_INDEX_FILE)
-            if confirm_and_save_changes(scraper.series_data, description, index_manager):
+            result = confirm_and_save_changes(scraper.series_data, description, index_manager)
+            if isinstance(result, dict) and result.get('rescrape'):
+                print(f"\n✓ Index updated. {len(result['urls'])} critical series marked for rescraping.")
+                print("→ Use option 7 (Retry failed series) to rescrape these later, or run the appropriate scrape option.")
+                logger.info("Partial data saved with critical series marked for rescraping")
+            elif result:
                 print(f"\n✓ Partial data saved ({len(scraper.series_data)} series)")
                 logger.info("%s interrupted — partial data saved", description)
         if 'scraper' in locals() and scraper.failed_links:

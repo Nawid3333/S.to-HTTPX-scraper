@@ -1011,10 +1011,55 @@ def _detect_episode_count_mismatches(old_data, new_dict):
     return mismatches
 
 
-def _prompt_episode_mismatches(mismatches):
-    """Prompt user only for warning/critical issues. Auto-approve info/minor changes."""
+def _extract_critical_series_for_rescrape(mismatches, old_data):
+    """Extract critical series and their URLs for rescraping.
+    
+    Returns:
+        dict with 'urls', 'titles', and 'series' keys for critical issues
+    """
+    critical = [m for m in mismatches if m["severity"] == "critical"]
+    if not critical:
+        return {'urls': [], 'titles': [], 'series': {}}
+    
+    if isinstance(old_data, list):
+        old_map = {s.get('title'): s for s in old_data if s and s.get('title')}
+    else:
+        old_map = dict(old_data) if old_data else {}
+    
+    urls = []
+    titles = []
+    series_data = {}
+    
+    for mismatch in critical:
+        title = mismatch['title']
+        titles.append(title)
+        
+        if title in old_map:
+            entry = old_map[title]
+            url = entry.get('url') or entry.get('link')
+            if url:
+                if not url.startswith('http'):
+                    url = f"https://s.to{url}"
+                urls.append(url)
+                series_data[title] = entry
+    
+    return {
+        'urls': urls,
+        'titles': titles,
+        'series': series_data,
+    }
+
+
+def _prompt_episode_mismatches(mismatches, old_data=None):
+    """Prompt user for warning/critical issues with option to delete & rescrape critical ones.
+    
+    Returns:
+        tuple: (proceed: bool, rescrape_data: dict or None)
+        - proceed: Whether to merge despite issues
+        - rescrape_data: Dict with 'urls', 'titles' if user chose to rescrape critical series
+    """
     if not mismatches:
-        return True
+        return True, None
 
     critical = [m for m in mismatches if m["severity"] == "critical"]
     warning = [m for m in mismatches if m["severity"] == "warning"]
@@ -1023,7 +1068,7 @@ def _prompt_episode_mismatches(mismatches):
     if not critical and not warning:
         if info:
             logger.debug("Auto-approved %d minor index updates", len(info))
-        return True
+        return True, None
 
     # Only show banner if actual issues exist
     print("\n" + "⚠️ " * 20)
@@ -1064,8 +1109,29 @@ def _prompt_episode_mismatches(mismatches):
     for m in critical + warning:
         logger.warning("Integrity check flagged: %s (%s)", m['title'], m['severity'])
 
-    choice = input("\n⚠️  Proceed with merge despite warnings? (y/n): ").strip().lower()
-    return choice == 'y'
+    # Offer options for critical issues
+    if critical:
+        print(f"\n🔧 OPTIONS:")
+        print(f"  1. Proceed with merge despite issues")
+        print(f"  2. Delete index & rescrape for {len(critical)} critical series")
+        print(f"  3. Cancel (discard all changes)\n")
+        choice = input("Choose option (1-3): ").strip()
+        
+        if choice == '2':
+            # Extract URLs for rescraping
+            rescrape_data = _extract_critical_series_for_rescrape(critical, old_data)
+            if rescrape_data['urls']:
+                print(f"\n✓ Will rescrape {len(rescrape_data['urls'])} critical series")
+                return False, rescrape_data  # False = don't merge now, rescrape instead
+            else:
+                print(f"\n⚠ Could not extract URLs for critical series")
+                return False, None
+        elif choice == '3':
+            return False, None
+        # Default or choice '1': proceed
+    else:
+        choice = input("\n⚠️  Proceed with merge despite warnings? (y/n): ").strip().lower()
+        return choice == 'y', None
 
 
 def _prompt_change_confirmations(changes, new_dict):
@@ -1522,7 +1588,13 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_fil
 
 
 def confirm_and_save_changes(new_data, description, index_manager):
-    """Show changes, ask for separate watched/unwatched confirmation, merge, and save."""
+    """Show changes, ask for separate watched/unwatched confirmation, merge, and save.
+    
+    Returns:
+        True: Changes saved
+        False: Merge cancelled or no changes
+        dict: Special handling for critical integrity issues needing rescrape
+    """
     old_data = dict(index_manager.series_index)
 
     if isinstance(new_data, list):
@@ -1554,9 +1626,27 @@ def confirm_and_save_changes(new_data, description, index_manager):
 
     # Check for episode count mismatches before merging
     mismatches = _detect_episode_count_mismatches(old_data, new_dict)
-    if mismatches and not _prompt_episode_mismatches(mismatches):
-        print("✗ Merge cancelled due to episode count mismatches.")
-        return False
+    if mismatches:
+        proceed, rescrape_data = _prompt_episode_mismatches(mismatches, old_data)
+        if rescrape_data:
+            # User chose to delete & rescrape critical series
+            print(f"\n→ Preparing to rescrape {len(rescrape_data['titles'])} critical series...")
+            
+            # Remove critical series from index
+            titles_to_remove = set(rescrape_data['titles'])
+            for title in titles_to_remove:
+                if title in index_manager.series_index:
+                    del index_manager.series_index[title]
+                    logger.info("Deleted critical series from index: %s", title)
+            
+            index_manager.save_index()
+            print(f"✓ Removed {len(titles_to_remove)} critical series from index")
+            
+            # Return rescrape data so main.py can handle the rescraping
+            return {'rescrape': True, 'urls': rescrape_data['urls'], 'titles': rescrape_data['titles']}
+        elif not proceed:
+            print("✗ Merge cancelled due to episode count mismatches.")
+            return False
 
     # Detect housekeeping changes BEFORE merge (merge mutates old_data in place)
     housekeeping = _detect_housekeeping_changes(old_data, new_dict)
