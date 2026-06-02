@@ -1103,9 +1103,20 @@ def _prompt_episode_mismatches(mismatches, old_data=None):
     print(f"DATA INTEGRITY CHECK")
     print("━" * 70)
 
-    # Log only actual problems (minimal logging)
-    for m in critical + warning:
-        logger.warning("Integrity check flagged: %s (%s)", m['title'], m['severity'])
+    # Write integrity check issues to file only (no console logging)
+    if critical + warning:
+        try:
+            log_file = os.path.join(os.path.dirname(__file__), '..', 'logs', 'integrity_check.log')
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(f"\n[{datetime.now().isoformat()}] Integrity Check\n")
+                f.write(f"Critical: {len(critical)}, Warnings: {len(warning)}\n")
+                for m in critical:
+                    f.write(f"  CRITICAL - {m['title']}: {len(m['issues'])} issue(s)\n")
+                for m in warning:
+                    f.write(f"  WARNING - {m['title']}: {len(m['issues'])} issue(s)\n")
+        except Exception:
+            pass  # Silent fail for logging
 
     # Show CRITICAL issues with pagination
     if critical:
