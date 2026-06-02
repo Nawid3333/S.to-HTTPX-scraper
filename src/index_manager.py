@@ -1070,68 +1070,95 @@ def _prompt_episode_mismatches(mismatches, old_data=None):
             logger.debug("Auto-approved %d minor index updates", len(info))
         return True, None
 
-    # Only show banner if actual issues exist
-    print("\n" + "⚠️ " * 20)
-    print(f"⚠️  DATA INTEGRITY CHECK: {len(critical)} CRITICAL | {len(warning)} WARNING")
-    print("─" * 70)
+    def _format_mismatch_issue(issue):
+        """Format a single issue into readable text."""
+        lines = []
+        if issue['type'] == 'season_structure_change':
+            if issue.get('seasons_removed'):
+                lines.append(f"   → Seasons removed: {', '.join(issue['seasons_removed'])}")
+            if issue.get('seasons_added'):
+                lines.append(f"   → Seasons added: {', '.join(issue['seasons_added'])}")
+        elif issue['type'] == 'total_episode_count':
+            lines.append(f"   → Episodes: {issue['old']} → {issue['new']} ({issue['diff']:+d}, {issue['percent_diff']}%)")
+        elif issue['type'] == 'per_season_episode_mismatch':
+            for s in issue['seasons']:
+                lines.append(f"   → S{s['season']}: {s['old_count']} → {s['new_count']} eps ({s['diff']:+d})")
+        elif issue['type'] == 'watched_status_inconsistency':
+            lines.append(f"   → CORRUPTION: Watched ({issue['old_watched']}) > Total ({issue['new_total']})")
+        elif issue['type'] == 'unwatched_calculation_mismatch':
+            lines.append(f"   → Calculation error: Expected unwatched {issue['expected']}, stored {issue['stored']}")
+        else:
+            lines.append(f"   → {issue['type']}")
+        return lines
 
-    for m in critical:
-        print(f"\n🔴 {m['title']}")
-        for issue in m['issues']:
-            if issue['type'] == 'season_structure_change':
-                if issue.get('seasons_removed'):
-                    print(f"   ❌ Seasons removed: {', '.join(issue['seasons_removed'])}")
-                if issue.get('seasons_added'):
-                    print(f"   ✨ Seasons added: {', '.join(issue['seasons_added'])}")
-            elif issue['type'] == 'total_episode_count':
-                print(f"   📉 Total episodes: {issue['old']} → {issue['new']} ({issue['diff']} diff, {issue['percent_diff']}%)")
-            elif issue['type'] == 'watched_status_inconsistency':
-                print(f"   ⚠️  CORRUPTION: Watched ({issue['old_watched']}) > Total ({issue['new_total']})")
-            elif issue['type'] == 'unwatched_calculation_mismatch':
-                print(f"   ⚠️  Math error: Expected unwatched {issue['expected']}, stored {issue['stored']}")
-            else:
-                print(f"   ⚠️  {issue['type']}")
+    def _format_mismatch_entry(mismatch):
+        """Format a complete mismatch entry (title + all issues)."""
+        lines = [f" {mismatch['title']}"]
+        for issue in mismatch['issues']:
+            lines.extend(_format_mismatch_issue(issue))
+        return "\n".join(lines)
 
-    for m in warning:
-        print(f"\n🟡 {m['title']}")
-        for issue in m['issues']:
-            if issue['type'] == 'per_season_episode_mismatch':
-                for s in issue['seasons'][:3]:
-                    print(f"   S{s['season']}: {s['old_count']} → {s['new_count']} eps")
-            elif issue['type'] == 'total_episode_count':
-                print(f"   📉 {issue['old']} → {issue['new']} eps")
-            else:
-                print(f"   ⚠️  {issue['type']}")
+    # Display header
+    print("\n" + "━" * 70)
+    print(f"DATA INTEGRITY CHECK")
+    print("━" * 70)
 
-    print("\n" + "─" * 70)
-    
     # Log only actual problems (minimal logging)
     for m in critical + warning:
         logger.warning("Integrity check flagged: %s (%s)", m['title'], m['severity'])
 
+    # Show CRITICAL issues with pagination
+    if critical:
+        print(f"\nCRITICAL ISSUES ({len(critical)})")
+        print("───────────────────────────────────────────────────────────────────")
+        
+        formatted_critical = [_format_mismatch_entry(m) for m in critical]
+        paginate_list(
+            formatted_critical,
+            lambda x: x,
+            page_size=3
+        )
+
+    # Show WARNING issues with pagination
+    if warning:
+        print(f"\nWARNINGS ({len(warning)})")
+        print("───────────────────────────────────────────────────────────────────")
+        
+        formatted_warnings = [_format_mismatch_entry(m) for m in warning]
+        paginate_list(
+            formatted_warnings,
+            lambda x: x,
+            page_size=5
+        )
+
+    print("\n" + "━" * 70)
+
     # Offer options for critical issues
     if critical:
-        print(f"\n🔧 OPTIONS:")
-        print(f"  1. Proceed with merge despite issues")
-        print(f"  2. Delete index & rescrape for {len(critical)} critical series")
-        print(f"  3. Cancel (discard all changes)\n")
+        print(f"\nOPTIONS")
+        print("───────────────────────────────────────────────────────────────────")
+        print(f"1) Proceed with merge despite issues")
+        print(f"2) Delete index & rescrape {len(critical)} critical series")
+        print(f"3) Cancel (discard all changes)\n")
         choice = input("Choose option (1-3): ").strip()
         
         if choice == '2':
             # Extract URLs for rescraping
             rescrape_data = _extract_critical_series_for_rescrape(critical, old_data)
             if rescrape_data['urls']:
-                print(f"\n✓ Will rescrape {len(rescrape_data['urls'])} critical series")
+                print(f"\nWill rescrape {len(rescrape_data['urls'])} critical series")
                 return False, rescrape_data  # False = don't merge now, rescrape instead
             else:
-                print(f"\n⚠ Could not extract URLs for critical series")
+                print(f"\nCould not extract URLs for critical series")
                 return False, None
         elif choice == '3':
             return False, None
         # Default or choice '1': proceed
     else:
-        choice = input("\n⚠️  Proceed with merge despite warnings? (y/n): ").strip().lower()
+        choice = input("\nProceed with merge despite warnings? (y/n): ").strip().lower()
         return choice == 'y', None
+    
+    return True, None
 
 
 def _prompt_change_confirmations(changes, new_dict):
