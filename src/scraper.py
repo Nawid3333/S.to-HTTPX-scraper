@@ -1105,10 +1105,19 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         print(f"→ Scraping {len(filtered)} series with {n} session(s)...")
 
         tasks = [
-            self._worker(i, queue, results, progress, len(filtered))
+            asyncio.create_task(
+                self._worker(i, queue, results, progress, len(filtered))
+            )
             for i in range(n)
         ]
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+        except ScrapingPaused:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.series_data = results
+            raise
 
         self.series_data = results
 

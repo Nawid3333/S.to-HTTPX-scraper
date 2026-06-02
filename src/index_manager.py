@@ -980,8 +980,8 @@ def _detect_episode_count_mismatches(old_data, new_dict):
                 "samples": title_changes[:3],
             })
 
-        # 5. Check watched status inconsistencies (partial watched series)
-        if old_watched > 0 and old_watched < old_total and new_watched > new_total:
+        # 5. Check watched status inconsistencies - ALWAYS flag if watched > total
+        if new_total > 0 and new_watched > new_total:
             mismatch_details["issues"].append({
                 "type": "watched_status_inconsistency",
                 "old_watched": old_watched,
