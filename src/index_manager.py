@@ -900,10 +900,10 @@ def _detect_episode_count_mismatches(old_data, new_dict):
                 "diff": diff,
                 "percent_diff": percent_diff,
             })
-            if percent_diff > 20 or diff > 10:
-                mismatch_details["severity"] = "critical"
-            elif percent_diff > 10 or diff > 5:
-                mismatch_details["severity"] = "warning"
+            # Only flag EPISODE LOSS as critical (disappearance)
+            # Episode additions are normal (weekly releases), not a warning
+            if new_total < old_total:
+                mismatch_details["severity"] = "critical"  # Episodes disappeared
 
         # 2. Check season count changes
         old_seasons = {s.get('season'): s for s in old_entry.get('seasons', [])}
