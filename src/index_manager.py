@@ -1710,20 +1710,7 @@ def confirm_and_save_changes(new_data, description, index_manager):
     if mismatches:
         proceed, rescrape_data = _prompt_episode_mismatches(mismatches, old_data)
         if rescrape_data:
-            # User chose to delete & rescrape critical series
-            print(f"\n→ Preparing to rescrape {len(rescrape_data['titles'])} critical series...")
-            
-            # Remove critical series from index
-            titles_to_remove = set(rescrape_data['titles'])
-            for title in titles_to_remove:
-                if title in index_manager.series_index:
-                    del index_manager.series_index[title]
-                    logger.info("Deleted critical series from index: %s", title)
-            
-            index_manager.save_index()
-            print(f"✓ Removed {len(titles_to_remove)} critical series from index")
-            
-            # Return rescrape data so main.py can handle the rescraping
+            # Return rescrape data so main.py can handle deletion + rescraping
             return {'rescrape': True, 'urls': rescrape_data['urls'], 'titles': rescrape_data['titles']}
         elif not proceed:
             print("✗ Merge cancelled due to episode count mismatches.")

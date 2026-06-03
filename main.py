@@ -301,9 +301,16 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
             index_manager = IndexManager(SERIES_INDEX_FILE)
             result = confirm_and_save_changes(scraper.series_data, description, index_manager)
             if isinstance(result, dict) and result.get('rescrape'):
-                print(f"\n✓ Index updated. {len(result['urls'])} critical series marked for rescraping.")
-                print("→ Use option 7 (Retry failed series) to rescrape these later, or run the appropriate scrape option.")
-                logger.info("Partial data saved with critical series marked for rescraping")
+                remove_series_from_index(SERIES_INDEX_FILE, result['titles'])
+                for url, title in zip(result['urls'], result['titles']):
+                    scraper.failed_links.append({
+                        'url': url, 'title': title,
+                        'link': '', 'reason': 'integrity_check_failed',
+                    })
+                scraper.save_failed_series()
+                print(f"\n✓ {len(result['urls'])} critical series removed from index and added to retry list.")
+                print("→ Use option 7 (Retry failed series) to rescrape these.")
+                logger.info("Critical series removed from index and added to retry list after Ctrl+C")
             elif result:
                 print(f"\n✓ Partial data saved ({len(scraper.series_data)} series)")
                 logger.info("%s interrupted — partial data saved", description)
