@@ -891,7 +891,7 @@ def _detect_episode_count_mismatches(old_data, new_dict):
 
         # 1. Check total episode count difference
         if old_total != new_total:
-            diff = abs(old_total - new_total)
+            diff = new_total - old_total
             percent_diff = round((diff / max(old_total, new_total)), 3) * 100 if max(old_total, new_total) > 0 else 0
             mismatch_details["issues"].append({
                 "type": "total_episode_count",
@@ -935,7 +935,7 @@ def _detect_episode_count_mismatches(old_data, new_dict):
             new_season_count = len(new_season_eps)
 
             if old_season_count != new_season_count:
-                diff = abs(old_season_count - new_season_count)
+                diff = new_season_count - old_season_count
                 season_issues.append({
                     "season": season_label,
                     "old_count": old_season_count,
@@ -1000,6 +1000,16 @@ def _detect_episode_count_mismatches(old_data, new_dict):
                 "expected": new_unwatched_calculated,
                 "stored": new_unwatched_stored,
                 "description": "Unwatched episodes field doesn't match (total - watched)"
+            })
+            if mismatch_details["severity"] == "info":
+                mismatch_details["severity"] = "warning"
+
+        # 7. Watched count drop
+        if new_watched < old_watched:
+            mismatch_details["issues"].append({
+                "type": "watched_count_drop",
+                "old_watched": old_watched,
+                "new_watched": new_watched,
             })
             if mismatch_details["severity"] == "info":
                 mismatch_details["severity"] = "warning"
@@ -1085,6 +1095,13 @@ def _prompt_episode_mismatches(mismatches, old_data=None):
                 lines.append(f"   → S{s['season']}: {s['old_count']} → {s['new_count']} eps ({s['diff']:+d})")
         elif issue['type'] == 'watched_status_inconsistency':
             lines.append(f"   → CORRUPTION: Watched ({issue['old_watched']}) > Total ({issue['new_total']})")
+        elif issue['type'] == 'watched_count_drop':
+            diff = issue['new_watched'] - issue['old_watched']
+            lines.append(f"   → Watched drop: {issue['old_watched']} → {issue['new_watched']} ({diff:+d})")
+        elif issue['type'] == 'episode_title_changes':
+            lines.append(f"   → {issue['count']} episode title(s) changed")
+            for s in issue.get('samples', []):
+                lines.append(f"     [{s['season']}] Ep {s['episode']}: \"{s['old_title']}\" → \"{s['new_title']}\"")
         elif issue['type'] == 'unwatched_calculation_mismatch':
             lines.append(f"   → Calculation error: Expected unwatched {issue['expected']}, stored {issue['stored']}")
         else:
@@ -1529,7 +1546,7 @@ def _prompt_vanished_deletions(vanished_entries):
     return to_delete
 
 
-def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_file=None):
+def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_file=None, new_data=None):
     """Detect indexed series not found in the current scrape.
 
     Shows vanished series and prompts the user to delete each one.
@@ -1597,6 +1614,32 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_fil
 
         # Only offer deletion for full catalog scopes
         if scrape_scope in ('all', 'new_only'):
+            # Show new series alongside so user can spot renames before deciding
+            if new_data is not None:
+                old_titles = set(old_data.keys())
+                if isinstance(new_data, list):
+                    new_dict = {s.get('title'): s for s in new_data if s.get('title')}
+                else:
+                    new_dict = dict(new_data)
+                incoming_new = [t for t in new_dict if t and t not in old_titles]
+                if incoming_new:
+                    print(f"\n{separator}")
+                    print(
+                        f"  [INFO] {len(incoming_new)} NEW series in this scrape"
+                        " (may be renames of the above):"
+                    )
+                    print(separator)
+                    for title in incoming_new:
+                        series = new_dict[title]
+                        watched = series.get('watched_episodes', 0)
+                        total_ep = series.get('total_episodes', 0)
+                        url = series.get('url', series.get('link', ''))
+                        print(
+                            f"  + {title}: {watched}/{total_ep} watched"
+                            + (f"  ({url})" if url else "")
+                        )
+                    print(separator)
+
             to_delete = _prompt_vanished_deletions(vanished)
 
             if to_delete and index_file:

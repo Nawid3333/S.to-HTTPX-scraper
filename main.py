@@ -29,6 +29,7 @@ from src.scraper import SToScraper  # noqa: E402  # pylint: disable=wrong-import
 from src.index_manager import (  # noqa: E402  # pylint: disable=wrong-import-position
     IndexManager, confirm_and_save_changes, show_vanished_series,
     _extract_slug_from_field, get_episode_counts,
+    remove_series_from_index,
 )
 
 
@@ -247,6 +248,7 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
                 vanished_kept = show_vanished_series(
                     index_manager.series_index, all_slugs, scope,
                     index_file=SERIES_INDEX_FILE,
+                    new_data=scraper.series_data,
                 )
                 if len(vanished_kept) < len(index_manager.series_index):
                     # Reload index after deletions so confirm_and_save works with clean data
@@ -254,23 +256,17 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
 
             result = confirm_and_save_changes(scraper.series_data, description, index_manager)
             if isinstance(result, dict) and result.get('rescrape'):
-                # Handle critical data integrity issues: rescrape
-                print(f"\n→ Critical data integrity issues detected!")
-                print(f"  Affected series: {', '.join(result['titles'][:5])}")
-                if len(result['titles']) > 5:
-                    print(f"  ... and {len(result['titles']) - 5} more")
-                
-                confirm = input(f"\nRescrape these {len(result['urls'])} critical series now? (y/n): ").strip().lower()
-                if confirm == 'y':
-                    print(f"\n→ Rescraping {len(result['urls'])} critical series...\n")
-                    _run_scrape_and_save(
-                        run_kwargs={'url_list': result['urls'], 'parallel': False},
-                        description=f"Rescrape critical series ({len(result['urls'])})",
-                        success_msg=f"Critical series rescraping completed! {len(result['urls'])} series updated.",
-                        no_data_msg="No data scraped for critical series",
-                    )
-                else:
-                    print(f"  → Rescraping cancelled. Series will remain deleted from index.")
+                # User already confirmed deletion in the integrity dialog — proceed directly
+                n = len(result['urls'])
+                print(f"\n→ Deleting {n} critical series from index before rescraping...")
+                remove_series_from_index(SERIES_INDEX_FILE, result['titles'])
+                print(f"\n→ Rescraping {n} critical series...\n")
+                _run_scrape_and_save(
+                    run_kwargs={'url_list': result['urls'], 'parallel': False},
+                    description=f"Rescrape critical series ({n})",
+                    success_msg=f"Critical series rescraping completed! {n} series updated.",
+                    no_data_msg="No data scraped for critical series",
+                )
             elif result:
                 print(f"\n✓ {success_msg}")
                 print_completed_series_alerts(index_manager)
