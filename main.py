@@ -245,14 +245,13 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
             if scraper.all_discovered_series is not None:
                 all_slugs = {_extract_slug(s) for s in scraper.all_discovered_series} - {None}
                 scope = vanished_scope or ('new_only' if run_kwargs.get('new_only') else 'all')
-                vanished_kept = show_vanished_series(
+                show_vanished_series(
                     index_manager.series_index, all_slugs, scope,
                     index_file=SERIES_INDEX_FILE,
                     new_data=scraper.series_data,
                 )
-                if len(vanished_kept) < len(index_manager.series_index):
-                    # Reload index after deletions so confirm_and_save works with clean data
-                    index_manager.load_index()
+                # Always reload: show_vanished_series may have deleted entries from disk
+                index_manager.load_index()
 
             result = confirm_and_save_changes(scraper.series_data, description, index_manager)
             if isinstance(result, dict) and result.get('rescrape'):
@@ -272,8 +271,18 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
                 print_completed_series_alerts(index_manager)
                 logger.info(success_msg)
         else:
-            print(f"\n⚠ {no_data_msg}")
-            logger.warning(no_data_msg)
+            if run_kwargs.get('retry_failed') and scraper.failed_links:
+                n = len(scraper.failed_links)
+                print(f"\n✗ All {n} retried series failed again:")
+                for entry in scraper.failed_links:
+                    title = entry.get('title') or entry.get('url', '?')
+                    reason = entry.get('reason', 'unknown error')
+                    print(f"  • {title}  →  {reason}")
+                print("\n→ Failed list preserved. Use option 7 to retry again.")
+                logger.warning("All %d retried series failed again", n)
+            else:
+                print(f"\n⚠ {no_data_msg}")
+                logger.warning(no_data_msg)
 
         # Only clear checkpoint if scraping completed (not paused)
         if not scraper.paused:
@@ -405,6 +414,7 @@ def scrape_unwatched():
             'url_list': unwatched_urls,
             'resume_only': resume,
             'parallel': use_parallel,
+            'checkpoint_mode': 'unwatched',
         },
         description=f"Unwatched series scrape ({len(unwatched_urls)} series)",
         success_msg=f"Unwatched series scraping completed! ({len(unwatched_urls)} series)",

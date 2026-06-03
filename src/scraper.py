@@ -399,33 +399,46 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     # ── Failed series management ────────────────────────────────────────────
 
-    def save_failed_series(self):
+    def save_failed_series(self, replace=False):
+        """Persist failed series list to disk.
+
+        If replace=True (retry mode), overwrites the file with only the
+        current failed_links -- removing series that succeeded this run.
+        If replace=False (default), merges new failures into the existing list.
+        """
         with self._lock:
             ignored_urls = {
                 s.get('url') for s in self.load_ignored_series()
             }
-            existing = []
-            try:
-                if os.path.exists(self.failed_file):
-                    with open(self.failed_file, 'r', encoding='utf-8') as f:
-                        existing = json.load(f)
-            except Exception:
-                pass
-            # Drop any entries already on the ignore list
-            existing = [
-                e for e in existing
-                if isinstance(e, dict) and e.get('url') not in ignored_urls
-            ]
-            seen = {e.get('url') for e in existing if isinstance(e, dict)}
-            for f in self.failed_links:
-                if (isinstance(f, dict) and f.get('url') not in seen
-                        and f.get('url') not in ignored_urls):
-                    existing.append(f)
-                    seen.add(f.get('url'))
+            if replace:
+                to_save = [
+                    e for e in self.failed_links
+                    if isinstance(e, dict) and e.get('url') not in ignored_urls
+                ]
+            else:
+                existing = []
+                try:
+                    if os.path.exists(self.failed_file):
+                        with open(self.failed_file, 'r', encoding='utf-8') as f:
+                            existing = json.load(f)
+                except Exception:
+                    pass
+                # Drop any entries already on the ignore list
+                existing = [
+                    e for e in existing
+                    if isinstance(e, dict) and e.get('url') not in ignored_urls
+                ]
+                seen = {e.get('url') for e in existing if isinstance(e, dict)}
+                for e in self.failed_links:
+                    if (isinstance(e, dict) and e.get('url') not in seen
+                            and e.get('url') not in ignored_urls):
+                        existing.append(e)
+                        seen.add(e.get('url'))
+                to_save = existing
             tmp = self.failed_file + '.tmp'
             try:
                 with open(tmp, 'w', encoding='utf-8') as f_out:
-                    json.dump(existing, f_out, indent=2, ensure_ascii=False)
+                    json.dump(to_save, f_out, indent=2, ensure_ascii=False)
                 os.replace(tmp, self.failed_file)
             except Exception as e:
                 logger.error("Failed to save failed series: %s", e)
@@ -1196,7 +1209,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             return
 
         if url_list:
-            self._checkpoint_mode = 'batch'
+            if self._checkpoint_mode is None:
+                self._checkpoint_mode = 'batch'
             series_list = []
             for u in url_list:
                 main_url = self.normalize_to_series_url(u)
@@ -1349,13 +1363,16 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     def run(self, single_url=None, url_list=None, new_only=False,
             resume_only=False, retry_failed=False, parallel=None,
-            account_source=None):
+            account_source=None, checkpoint_mode=None):
         """Main entry point: login, scrape, save checkpoint."""
         if parallel is not None:
             self._use_parallel = parallel
             print(f"→ Using {'multi-session' if parallel else 'single-session'} mode")
         else:
             self._use_parallel = True
+
+        if checkpoint_mode is not None:
+            self._checkpoint_mode = checkpoint_mode
 
         # Clear any stale pause file from a previous run
         self._clear_pause_file()
@@ -1388,7 +1405,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             if not self.failed_links:
                 self.clear_failed_series()
             else:
-                self.save_failed_series()
+                self.save_failed_series(replace=retry_failed)
 
         except ScrapingPaused:
             self.paused = True
