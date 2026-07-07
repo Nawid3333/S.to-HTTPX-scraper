@@ -35,15 +35,13 @@ def _validate_and_normalize_url(url: str) -> str:
         raise ValueError(f"Invalid URL '{url}': {e}") from e
 
 
-# Site configuration
+# Site configuration (edit here, not in .env)
 try:
-    SITE_URL = _validate_and_normalize_url(
-        os.getenv("STO_SITE_URL", "https://s.to"))
+    SITE_URL = _validate_and_normalize_url("https://s.to")
 except ValueError:
     SITE_URL = "https://s.to"
 
-STO_FALLBACK_SITE_URL = os.getenv(
-    "STO_FALLBACK_SITE_URL", "https://serienstream.to")
+STO_FALLBACK_SITE_URL = "https://serienstream.to"
 try:
     STO_FALLBACK_SITE_URL = _validate_and_normalize_url(
         STO_FALLBACK_SITE_URL) if STO_FALLBACK_SITE_URL else None
@@ -51,16 +49,8 @@ except ValueError:
     STO_FALLBACK_SITE_URL = "https://serienstream.to"
 
 _STO_FALLBACK_SITE_URLS = []
-fallback_urls_raw = os.getenv("STO_FALLBACK_SITE_URLS", "")
-if fallback_urls_raw:
-    for url in fallback_urls_raw.split(","):
-        url = url.strip()
-        if url:
-            try:
-                _STO_FALLBACK_SITE_URLS.append(
-                    _validate_and_normalize_url(url))
-            except ValueError:
-                print(f"⚠ Warning: Invalid fallback URL skipped: {url}")
+# Optional: add additional fallback domains as validated strings below
+# _STO_FALLBACK_SITE_URLS.append(_validate_and_normalize_url("https://example.com"))
 
 # Built-in fallback domains
 _BUILTIN_FALLBACK_URLS = [
@@ -109,20 +99,16 @@ SERIES_INDEX_FILE = os.path.join(DATA_DIR, "series_index.json")
 # Logs directory
 LOG_FILE = os.path.join(LOGS_DIR, "s_to_backup.log")
 
-# Scraping configuration
-try:
-    NUM_WORKERS = int(os.getenv("STO_MAX_WORKERS", "10"))
-    if NUM_WORKERS < 1:
-        NUM_WORKERS = 10
-except ValueError:
-    NUM_WORKERS = 10
+# Scraping configuration (edit here, not in .env)
+NUM_WORKERS = 10  # Number of parallel httpx sessions
 
-# Timeouts
-try:
-    HTTP_REQUEST_TIMEOUT = float(os.getenv("STO_REQUEST_TIMEOUT", "20.0"))
-    if HTTP_REQUEST_TIMEOUT <= 0:
-        HTTP_REQUEST_TIMEOUT = 20.0
-except ValueError:
-    HTTP_REQUEST_TIMEOUT = 20.0
+# Timeouts (edit here, not in .env)
+HTTP_REQUEST_TIMEOUT = 20.0
+
+# Default batch file for single/batch URL import
+# Edit DEFAULT_BATCH_FILE_PATH below to change the default batch file
+DEFAULT_BATCH_FILE_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "series_urls.txt")
+DEFAULT_BATCH_FILE = os.path.abspath(DEFAULT_BATCH_FILE_PATH)
 
 print(f"✓ Config loaded (DATA_DIR: {os.path.abspath(DATA_DIR)})")
