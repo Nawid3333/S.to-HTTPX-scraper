@@ -5,7 +5,9 @@ Uses **httpx** (no browser needed) with a multi-session architecture for fast, p
 
 ## Features
 
-- **Multi-session parallel scraping** — 10 concurrent httpx sessions by default (configurable)
+- **Multi-session parallel scraping** — 10 concurrent httpx sessions by default (configurable in `config/config.py`)
+- **Host probing** — checks all configured hosts before scraping, compares site series count with the local index, and writes a `mismatch_report.json` when differences or duplicate slugs are detected
+- **Duplicate slug detection** — finds duplicate slugs in the index and offers to delete them before continuing
 - **Smart per-series ETA estimation** — each series stores its own `avg_scrape_seconds` (exponential moving average for ETA prediction) and `scrape_duration_seconds` (actual duration of the most recent scrape) in the index. ETA is predicted by summing those per-series averages for the remaining work, then blended with the live session rate (historical 85%→45% as progress increases). Because the database is stable, per-series history is the best predictor.
 - **Checkpoint & resume** — automatically saves progress every 10 series; resume after interruptions (Ctrl+C safe)
 - **Subscription & watchlist tracking** — scrape series from your s.to account subscriptions/watchlist and track status per series
@@ -41,17 +43,29 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Create a `.env` file inside the `config/` directory:
+Create a `.env` file inside the `config/` directory (see `config/.env.example`):
 
 ```
 STO_EMAIL=your@email.com
 STO_PASSWORD=yourpassword
 ```
 
-Scraping parallelism can be adjusted in `config/config.py`:
+`.env` is used **only for credentials**. All other settings (site URLs, fallback domains, workers, timeout, batch file paths) live in `config/config.py`.
+
+The default batch file is `series_urls.txt` next to `main.py`. To change it, edit `DEFAULT_BATCH_FILE_PATH` in `config/config.py`.
+
+Site URL and fallback domains are also defined in `config/config.py`:
 
 ```python
-NUM_WORKERS = 10  # Number of parallel httpx sessions
+SITE_URL = "https://s.to"
+STO_FALLBACK_SITE_URL = "https://serienstream.to"
+```
+
+Scraping parallelism and request timeout can be adjusted in `config/config.py`:
+
+```python
+NUM_WORKERS = 10            # Number of parallel httpx sessions
+HTTP_REQUEST_TIMEOUT = 20.0  # Seconds per request
 ```
 
 ## Usage
@@ -107,7 +121,7 @@ Filter options:
 - Watchlist only
 - Both subscribed and watchlist
 
-After report generation, you can export ongoing series URLs back to `series_urls.txt`.
+After report generation, you can export ongoing series URLs back to the default batch file (`series_urls.txt` by default).
 
 ## Episode 0 / Ignored Seasons
 
@@ -139,16 +153,16 @@ When ignored-season series are found in a scrape, they are processed first (two-
 ├── requirements.txt
 ├── series_urls.txt             # Optional batch URL file
 ├── config/
-│   ├── config.py               # Settings (credentials, workers, paths)
+│   ├── config.py               # Settings (credentials, site URLs, workers, timeout, paths)
 │   └── .env                    # Credentials (not committed)
 ├── data/
 │   ├── series_index.json       # Main series database
 │   ├── series_index.json.bak*  # 3 backup generations (auto-managed)
 │   ├── series_report.json      # Generated report
+│   ├── mismatch_report.json    # Created when index/site differences are detected
 │   ├── .ignored_seasons.json   # Episode 0 ignore list
 │   ├── .ignored_series.json    # Series to skip during scraping
 │   ├── .scrape_checkpoint.json # Resume checkpoint (auto-managed)
-
 │   ├── .failed_series.json     # Failed series list (auto-managed)
 │   └── .pause_scraping         # Pause flag file (auto-managed)
 ├── src/
