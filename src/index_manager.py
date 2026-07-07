@@ -1854,9 +1854,29 @@ def confirm_and_save_changes(new_data, description, index_manager):
     old_data = dict(index_manager.series_index)
 
     if isinstance(new_data, list):
-        new_dict = {s.get('title'): s for s in new_data if s.get('title')}
+        new_dict = {
+            s.get('title'): s
+            for s in new_data
+            if s.get('title') and not s.get('_error')
+        }
+        skipped_errors = [
+            s for s in new_data
+            if isinstance(s, dict) and s.get('_error')
+        ]
     else:
-        new_dict = dict(new_data)
+        new_dict = {
+            k: v
+            for k, v in dict(new_data).items()
+            if not v.get('_error')
+        }
+        skipped_errors = [v for k, v in dict(
+            new_data).items() if v.get('_error')]
+
+    if skipped_errors:
+        print(
+            f"\n⚠ Skipping {len(skipped_errors)} failed/error series from save.")
+        logger.warning("Skipped %d error series from save.",
+                       len(skipped_errors))
 
     changes = detect_changes(old_data, new_dict)
     logger.info("Detected changes: %s", {k: len(v)

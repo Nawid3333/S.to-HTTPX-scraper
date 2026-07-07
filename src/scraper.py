@@ -691,10 +691,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         url = url.split('?')[0].split('#')[0]
         m = _SERIE_PATH_RE.search(url)
         if m:
-            if url.startswith('http://') or url.startswith('https://'):
-                parsed = urlparse(url)
-                return f"{parsed.scheme}://{parsed.netloc}{m.group(1)}"
-            return _build_full_url(SITE_URL, m.group(1))
+            return _build_full_url(self.site_url, m.group(1))
         return url
 
     # ── Pause detection ─────────────────────────────────────────────────────
@@ -1112,7 +1109,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
     @staticmethod
     def _error_result(info: dict, reason: str) -> dict:
         return {
-            "title": f"[ERROR: {reason}]",
+            "title": info.get("title", ""),
             "link": info.get("link", ""),
             "url": info.get("url", ""),
             "total_seasons": 0,
@@ -1122,6 +1119,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             "subscribed": None,
             "watchlist": None,
             "seasons": [],
+            "_error": True,
+            "_error_reason": reason,
         }
 
     # ── Worker ──────────────────────────────────────────────────────────────
@@ -1152,11 +1151,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
                 result = await self._scrape_one_series(client, info)
 
-                if result["title"].startswith("[ERROR"):
-                    # Extract actual error reason from "[ERROR: reason]"
-                    raw = result["title"]
-                    reason = raw[8:-1] if raw.startswith(
-                        "[ERROR: ") and raw.endswith("]") else "scrape_error"
+                if result.get("_error"):
+                    reason = result.get("_error_reason") or "scrape_error"
                     self.failed_links.append({
                         "url": info["url"],
                         "title": info.get("title", ""),
@@ -1236,10 +1232,11 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 ep0_warn = " ⚠ episode 0 detected" if result.get(
                     "_has_episode_zero") else ""
 
-                if result["title"].startswith("[ERROR"):
+                if result.get("_error"):
+                    reason = result.get("_error_reason", "Failed")
                     print(
                         f"[{done}/{total}] [{progress_bar}] {pct}% | ETA: {eta_mins}m"
-                        f" | ⚠ {info.get('title', '?')}: Failed"
+                        f" | ⚠ {info.get('title', '?')}: {reason}"
                     )
                 elif result["total_episodes"] == 0:
                     print(
@@ -1452,24 +1449,16 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             m = _SERIE_PATH_RE.search(main_url)
             link = m.group(1) if m else main_url
             canonical_url = _build_full_url(SITE_URL, link)
-            if main_url.startswith('http://') or main_url.startswith('https://'):
-                parsed_main = urlparse(main_url)
-                if parsed_main.netloc != urlparse(SITE_URL).netloc:
-                    scrape_url = main_url
-                else:
-                    scrape_url = _build_full_url(self.site_url, link)
-            else:
-                scrape_url = _build_full_url(self.site_url, link)
             info = {
                 "title": main_url.split("/")[-1],
                 "link": link,
                 "url": canonical_url,
-                "scrape_url": scrape_url,
+                "scrape_url": main_url,
             }
             print(f"→ Scraping single series: {canonical_url}")
             result = await self._scrape_one_series(tmp, info)
             await tmp.aclose()
-            if result["title"].startswith("[ERROR"):
+            if result.get("_error"):
                 self.failed_links.append(info)
                 self.series_data = []
             else:
@@ -1485,19 +1474,11 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 m = _SERIE_PATH_RE.search(main_url)
                 link = m.group(1) if m else main_url
                 canonical_url = _build_full_url(SITE_URL, link)
-                if main_url.startswith('http://') or main_url.startswith('https://'):
-                    parsed_main = urlparse(main_url)
-                    if parsed_main.netloc != urlparse(SITE_URL).netloc:
-                        scrape_url = main_url
-                    else:
-                        scrape_url = _build_full_url(self.site_url, link)
-                else:
-                    scrape_url = _build_full_url(self.site_url, link)
                 series_list.append({
                     "title": main_url.split("/")[-1],
                     "link": link,
                     "url": canonical_url,
-                    "scrape_url": scrape_url,
+                    "scrape_url": main_url,
                 })
             await tmp.aclose()
             n = NUM_WORKERS if self._use_parallel and len(
@@ -1686,7 +1667,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             # Alert for empty series (0 episodes) — exclude error results
             empty = [s for s in self.series_data
                      if s.get('total_episodes', 0) == 0
-                     and not s.get('title', '').startswith('[ERROR')]
+                     and not s.get('_error')]
             if empty:
                 print(f"\n⚠ {len(empty)} series with 0 episodes:")
                 for s in empty:
