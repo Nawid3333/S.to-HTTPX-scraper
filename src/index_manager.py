@@ -598,8 +598,6 @@ class IndexManager:
                         logger.warning(
                             "Loaded index is empty or contains no valid series")
 
-                print(
-                    f"[OK] Loaded {len(self.series_index)} series from index")
             except json.JSONDecodeError as e:
                 print(f"[ERROR] Index file corrupted: {e}")
                 logger.error("Index file corrupted: %s", e)

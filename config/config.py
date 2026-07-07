@@ -62,6 +62,19 @@ if fallback_urls_raw:
             except ValueError:
                 print(f"⚠ Warning: Invalid fallback URL skipped: {url}")
 
+# Built-in fallback domains
+_BUILTIN_FALLBACK_URLS = [
+    "http://186.2.175.5/",
+]
+for builtin_url in _BUILTIN_FALLBACK_URLS:
+    try:
+        normalized = _validate_and_normalize_url(builtin_url)
+        if normalized not in _STO_FALLBACK_SITE_URLS:
+            _STO_FALLBACK_SITE_URLS.append(normalized)
+    except ValueError:
+        print(
+            f"⚠ Warning: Invalid built-in fallback URL skipped: {builtin_url}")
+
 # Ensure primary fallback URL is in the list
 if STO_FALLBACK_SITE_URL and STO_FALLBACK_SITE_URL not in _STO_FALLBACK_SITE_URLS:
     _STO_FALLBACK_SITE_URLS.insert(0, STO_FALLBACK_SITE_URL)
@@ -112,4 +125,4 @@ try:
 except ValueError:
     HTTP_REQUEST_TIMEOUT = 20.0
 
-print(f"✓ Config loaded (DATA_DIR: {DATA_DIR})")
+print(f"✓ Config loaded (DATA_DIR: {os.path.abspath(DATA_DIR)})")

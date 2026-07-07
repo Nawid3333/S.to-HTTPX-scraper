@@ -19,6 +19,7 @@ import re
 import shutil
 import sys
 import time
+from collections import Counter
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -233,7 +234,186 @@ def _check_checkpoint(expected_mode):
     return {'ok': False, 'resume': False}
 
 
-def _probe_sites_before_scrape(scraper):
+def _host_label(site_url):
+    """Return the hostname part of a URL for display."""
+    return urlparse(site_url).netloc
+
+
+def _format_host_rows(hosts):
+    """Return a list of table-formatted host status lines.
+
+    hosts is a list of (label, status, count, idx_match) tuples.
+    """
+    if not hosts:
+        return []
+
+    host_w = max(len(label) for label, *_ in hosts)
+    lines = [
+        f"  {'Host':<{host_w}}  Status    Series      Index",
+        f"  {'-' * host_w}  ------    ------      -----",
+    ]
+    for label, status, count, idx_match in hosts:
+        status_txt = "OK" if status else "FAILED"
+        count_txt = f"{count:,}" if count is not None else "-"
+        match_txt = "match" if idx_match is True else (
+            "mismatch" if idx_match is False else "-")
+        lines.append(
+            f"  {label:<{host_w}}  {status_txt:<8}  {count_txt:<10}  {match_txt}"
+        )
+    return lines
+
+
+def _probe_hosts(scraper, site_urls):
+    """Return probe results; on failure, print the error and return an empty list."""
+    try:
+        return asyncio.run(scraper.probe_sites(site_urls))
+    except Exception as exc:
+        print(f"  ✗ Probe failed: {exc}")
+        logger.exception("Host probe failed")
+        return []
+
+
+def _fetch_site_slugs_for_host(scraper, site_url):
+    """Fetch site slugs for a reachable host; return None on error."""
+    try:
+        return asyncio.run(scraper.get_series_slugs_for_site(site_url))
+    except Exception as exc:
+        logger.warning(
+            "Could not fetch series slugs for %s: %s", site_url, exc)
+        return None
+
+
+def _collect_index_slugs(idx_mgr):
+    """Collect slugs from the local index, including entries without a slug."""
+    index_slugs_list = []
+    index_entries_without_slug = []
+    for title, s in idx_mgr.series_index.items():
+        slug = _extract_slug(s)
+        if slug:
+            index_slugs_list.append(slug)
+        else:
+            index_entries_without_slug.append({
+                'title': s.get('title', title),
+                'link': s.get('link', ''),
+                'url': s.get('url', ''),
+            })
+
+    index_duplicates = {
+        slug: n for slug, n in Counter(index_slugs_list).items() if n > 1
+    }
+    return set(index_slugs_list), index_duplicates, index_entries_without_slug
+
+
+def _save_mismatch_report(report_path, count, idx_count, index_slugs, site_slugs,
+                          only_in_index, only_on_site, index_duplicates,
+                          index_entries_without_slug):
+    """Write a mismatch report JSON and log the result."""
+    report = {
+        'generated': datetime.now().isoformat(),
+        'site_count': count,
+        'index_count': idx_count,
+        'index_unique_slugs': len(index_slugs),
+        'site_unique_slugs': len(site_slugs),
+        'index_entries_without_slug_count': len(index_entries_without_slug),
+        'only_in_index': sorted(only_in_index),
+        'only_on_site': sorted(only_on_site),
+        'index_duplicates': index_duplicates,
+        'index_entries_without_slug': index_entries_without_slug,
+    }
+    with open(report_path, 'w', encoding='utf-8') as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+    print(f"    📄 Mismatch report saved: {report_path}")
+    logger.info(
+        "Mismatch report saved: %d only-in-index, %d only-on-site, %d index duplicates",
+        len(only_in_index), len(only_on_site), len(index_duplicates))
+
+
+def _remove_duplicate_index_entries(idx_mgr, index_duplicates):
+    """Prompt to remove duplicate index entries and save if confirmed."""
+    dup_extra = sum(index_duplicates.values()) - len(index_duplicates)
+    print(
+        f"    ⚠ Found {len(index_duplicates)} duplicate slug(s) in index (extra count: {dup_extra})")
+    print("    Duplicate slugs:")
+    for dup_slug in sorted(index_duplicates):
+        print(f"      - {dup_slug}")
+
+    choice = input("\nDelete duplicate index entries? (y/n): ").strip().lower()
+    if choice != 'y':
+        return
+
+    removed_titles = []
+    for title, series in list(idx_mgr.series_index.items()):
+        slug = _extract_slug(series)
+        if slug in index_duplicates:
+            removed_titles.append(title)
+            del idx_mgr.series_index[title]
+    idx_mgr.save_index()
+    print(
+        f"    🗑 Removed {len(removed_titles)} duplicate entries. Run 'Fetch new series' to rescrape them.")
+    logger.info(
+        "Removed %d duplicate index entries: %s",
+        len(removed_titles), sorted(index_duplicates))
+
+
+def _cross_check_index(scraper, site_url, count, idx_mgr=None):
+    """Compare site slugs against the local index and report mismatches.
+
+    idx_mgr can be passed in to avoid reloading the index repeatedly.
+    """
+    if idx_mgr is None:
+        idx_mgr = IndexManager(SERIES_INDEX_FILE)
+    idx_count = len(idx_mgr.series_index)
+    if idx_count == 0:
+        return None
+
+    match = count == idx_count
+    diff = count - idx_count
+    if match:
+        return True
+
+    site_slugs = _fetch_site_slugs_for_host(scraper, site_url)
+    if site_slugs is None:
+        print(
+            f"    Index count: {idx_count}  →  match = False ({diff:+d} difference)")
+        print("    ⚠ Cannot compare slugs because site slug list is unavailable.")
+        return None
+
+    sign = '+' if diff > 0 else ''
+    print(
+        f"    Index count: {idx_count}  →  match = False ({sign}{diff} difference)")
+
+    index_slugs, index_duplicates, index_entries_without_slug = _collect_index_slugs(
+        idx_mgr)
+    only_in_index = index_slugs - site_slugs
+    only_on_site = site_slugs - index_slugs
+    has_real_mismatch = bool(only_in_index or index_duplicates)
+
+    report_path = os.path.join(DATA_DIR, 'mismatch_report.json')
+    if has_real_mismatch:
+        _save_mismatch_report(
+            report_path, count, idx_count, index_slugs, site_slugs,
+            only_in_index, only_on_site, index_duplicates,
+            index_entries_without_slug)
+    else:
+        if os.path.exists(report_path):
+            os.remove(report_path)
+        print(
+            "    ℹ Index has fewer series than site — expected if not all series were scraped yet. No mismatch report created.")
+        logger.info(
+            "Index count %d is below site count %d; no mismatch report generated",
+            idx_count, count)
+
+    if index_duplicates:
+        _remove_duplicate_index_entries(idx_mgr, index_duplicates)
+
+    if not only_in_index and not only_on_site and not index_duplicates:
+        print(
+            "    ⚠ Counts differ but slug sets match and no duplicates — possible slug normalization mismatch.")
+
+    return False
+
+
+def _probe_sites_before_scrape(scraper, idx_mgr=None):
     """Probe configured hosts, show OK/FAILED, and auto-select the first working one.
 
     This function is always called from a synchronous context (the main menu loop),
@@ -244,159 +424,52 @@ def _probe_sites_before_scrape(scraper):
     if not site_urls:
         return SITE_URL
 
+    # Load the index once and reuse it for every host cross-check.
+    if idx_mgr is None:
+        idx_mgr = IndexManager(SERIES_INDEX_FILE)
+
     print("\n→ Checking host availability...\n")
-    try:
-        results = asyncio.run(scraper.probe_sites(site_urls))
-    except Exception as exc:
-        print(f"  ✗ Probe failed: {exc}")
-        scraper.site_url = SITE_URL
-        ACTIVE_SITE_URL = scraper.site_url
-        return scraper.site_url
+    results = _probe_hosts(scraper, site_urls)
 
     ok_hosts = []
     host_counts = {}
-    for entry in results:
-        label = urlparse(entry['site_url']).netloc
-        status = "OK" if entry.get("ok") else "FAILED"
-        print(f"  - {label}: {status}")
-        if entry.get("ok"):
-            ok_hosts.append(entry['site_url'])
-            site_slugs = None
-            try:
-                site_slugs = asyncio.run(
-                    scraper.get_series_slugs_for_site(entry['site_url']))
-            except Exception as exc:
-                logger.warning(
-                    "Could not fetch series slugs for %s: %s", entry['site_url'], exc)
-            count = len(site_slugs) if site_slugs is not None else None
-            host_counts[entry['site_url']] = count
-            if count is None:
-                print("    Series count: unavailable")
-            else:
-                print(f"    Series count: {count}")
-                # Cross-check with local index
-                try:
-                    idx_mgr = IndexManager(SERIES_INDEX_FILE)
-                    idx_count = len(idx_mgr.series_index)
-                    if idx_count > 0:
-                        match = count == idx_count
-                        diff = count - idx_count
-                        if match:
-                            print(
-                                f"    Index count: {idx_count}  →  match = True")
-                        elif site_slugs is None:
-                            print(
-                                f"    Index count: {idx_count}  →  match = False ({diff:+d} difference)")
-                            print(
-                                "    ⚠ Cannot compare slugs because site slug list is unavailable.")
-                        else:
-                            sign = '+' if diff > 0 else ''
-                            print(
-                                f"    Index count: {idx_count}  →  match = False ({sign}{diff} difference)")
-                            # Fetch site slugs and compare to identify mismatched series
-                            try:
-                                index_slugs_list = []
-                                index_entries_without_slug = []
-                                for title, s in idx_mgr.series_index.items():
-                                    slug = _extract_slug(s)
-                                    if slug:
-                                        index_slugs_list.append(slug)
-                                    else:
-                                        index_entries_without_slug.append({
-                                            'title': s.get('title', title),
-                                            'link': s.get('link', ''),
-                                            'url': s.get('url', ''),
-                                        })
-                                index_slugs = set(index_slugs_list)
-                                from collections import Counter
-                                index_slug_counts = Counter(index_slugs_list)
-                                index_duplicates = {
-                                    slug: n for slug, n in index_slug_counts.items() if n > 1}
-                                only_in_index = index_slugs - site_slugs
-                                only_on_site = site_slugs - index_slugs
-                                has_real_mismatch = bool(
-                                    only_in_index or index_duplicates)
-                                report_path = os.path.join(
-                                    DATA_DIR, 'mismatch_report.json')
-                                if has_real_mismatch:
-                                    report = {
-                                        'generated': datetime.now().isoformat(),
-                                        'site_count': count,
-                                        'index_count': idx_count,
-                                        'index_unique_slugs': len(index_slugs),
-                                        'site_unique_slugs': len(site_slugs),
-                                        'index_entries_without_slug_count': len(index_entries_without_slug),
-                                        'only_in_index': sorted(only_in_index),
-                                        'only_on_site': sorted(only_on_site),
-                                        'index_duplicates': index_duplicates,
-                                        'index_entries_without_slug': index_entries_without_slug,
-                                    }
-                                    with open(report_path, 'w', encoding='utf-8') as f:
-                                        json.dump(report, f, indent=2,
-                                                  ensure_ascii=False)
-                                    print(
-                                        f"    📄 Mismatch report saved: {report_path}")
-                                    logger.info(
-                                        "Mismatch report saved: %d only-in-index, %d only-on-site, %d index duplicates",
-                                        len(only_in_index), len(only_on_site), len(index_duplicates))
-                                else:
-                                    if os.path.exists(report_path):
-                                        os.remove(report_path)
-                                    print(
-                                        "    ℹ Index has fewer series than site — expected if not all series were scraped yet. No mismatch report created.")
-                                    logger.info(
-                                        "Index count %d is below site count %d; no mismatch report generated",
-                                        idx_count, count)
-                                if index_duplicates:
-                                    dup_extra = sum(
-                                        index_duplicates.values()) - len(index_duplicates)
-                                    print(
-                                        f"    ⚠ Found {len(index_duplicates)} duplicate slug(s) in index (extra count: {dup_extra})")
-                                    print("    Duplicate slugs:")
-                                    for dup_slug in sorted(index_duplicates):
-                                        print(f"      - {dup_slug}")
-                                    choice = input(
-                                        "\nDelete duplicate index entries? (y/n): ").strip().lower()
-                                    if choice == 'y':
-                                        removed_titles = []
-                                        for title, series in list(idx_mgr.series_index.items()):
-                                            slug = _extract_slug(series)
-                                            if slug in index_duplicates:
-                                                removed_titles.append(title)
-                                                del idx_mgr.series_index[title]
-                                        idx_mgr.save_index()
-                                        print(
-                                            f"    🗑 Removed {len(removed_titles)} duplicate entries. Run 'Fetch new series' to rescrape them.")
-                                        logger.info(
-                                            "Removed %d duplicate index entries: %s",
-                                            len(removed_titles), sorted(index_duplicates))
-                                if not only_in_index and not only_on_site and not index_duplicates:
-                                    print(
-                                        "    ⚠ Counts differ but slug sets match and no duplicates — possible slug normalization mismatch.")
-                            except Exception as e:
-                                print(
-                                    f"    ⚠ Could not generate mismatch report: {e}")
-                                logger.exception(
-                                    "Could not generate mismatch report")
-                except Exception as e:
-                    print(f"  ⚠ Could not cross-check index: {e}")
-                    logger.exception("Could not cross-check index")
+    table_rows = []
 
-    if ok_hosts:
-        scraper.site_url = ok_hosts[0]
-        print(f"\n→ Active host: {scraper.site_url}")
-    else:
-        scraper.site_url = SITE_URL
-        print(f"\n→ Active host: {scraper.site_url} (default)")
+    for entry in results:
+        site_url = entry['site_url']
+        label = _host_label(site_url)
+        ok = bool(entry.get("ok"))
+        count = None
+        idx_match = None
+
+        if ok:
+            ok_hosts.append(site_url)
+            site_slugs = _fetch_site_slugs_for_host(scraper, site_url)
+            count = len(site_slugs) if site_slugs is not None else None
+            host_counts[site_url] = count
+            if count is not None:
+                idx_match = _cross_check_index(
+                    scraper, site_url, count, idx_mgr=idx_mgr)
+
+        table_rows.append((label, ok, count, idx_match))
+
+    for line in _format_host_rows(table_rows):
+        print(line)
+
+    scraper.site_url = ok_hosts[0] if ok_hosts else SITE_URL
+    suffix = "" if ok_hosts else " (default)"
+    print(f"\n→ Active host: {scraper.site_url}{suffix}")
 
     if len(ok_hosts) >= 2:
-        counts = [host_counts.get(
-            host) for host in ok_hosts if host_counts.get(host) is not None]
+        counts = [
+            host_counts.get(host) for host in ok_hosts
+            if host_counts.get(host) is not None
+        ]
         if len(counts) == len(ok_hosts) and counts:
             match = all(count == counts[0] for count in counts[1:])
-            print(f"\n→ Series count comparison: match = {match}")
+            print(f"→ Cross-host counts: match = {match}")
         else:
-            print("\n→ Series count comparison: match = False")
+            print("→ Cross-host counts: match = False")
 
     ACTIVE_SITE_URL = scraper.site_url
     return scraper.site_url
@@ -1027,10 +1100,17 @@ def pause_scraping():
 
 def main():
     """Main application loop"""
+    idx_mgr = IndexManager(SERIES_INDEX_FILE)
+    index_count = len(idx_mgr.series_index)
+    print(
+        f"✓ Index loaded ({os.path.abspath(SERIES_INDEX_FILE)}) ({index_count:,} entries)\n")
+
     print_header()
 
     if not validate_credentials():
         sys.exit(1)
+
+    print(f"\u2713 Credentials found for user: {EMAIL}\n")
 
     if not check_disk_space():
         response = input("Continue anyway? (y/n): ").strip().lower()
@@ -1038,7 +1118,7 @@ def main():
             sys.exit(1)
 
     scraper = SToScraper()
-    _probe_sites_before_scrape(scraper)
+    _probe_sites_before_scrape(scraper, idx_mgr=idx_mgr)
 
     while True:
         show_menu()
