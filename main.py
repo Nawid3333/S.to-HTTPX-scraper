@@ -9,6 +9,7 @@ Supports checkpoint resume, batch URL import, subscription/watchlist tracking,
 and interactive change confirmation.
 """
 
+import asyncio
 import copy
 import json
 import logging
@@ -17,13 +18,15 @@ import os
 import re
 import shutil
 import sys
+import time
+from datetime import datetime
 from urllib.parse import urlparse
 
 # Ensure project root is on sys.path so imports work from any working directory
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from config.config import (  # noqa: E402  # pylint: disable=import-error,no-name-in-module,wrong-import-position
-    EMAIL, PASSWORD, DATA_DIR, SERIES_INDEX_FILE, LOG_FILE,
+    EMAIL, PASSWORD, DATA_DIR, SERIES_INDEX_FILE, LOG_FILE, SITE_URL, SITE_URLS,
 )
 from src.scraper import SToScraper  # noqa: E402  # pylint: disable=wrong-import-position
 from src.index_manager import (  # noqa: E402  # pylint: disable=wrong-import-position
@@ -52,7 +55,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5),
+        logging.handlers.RotatingFileHandler(
+            LOG_FILE, maxBytes=10*1024*1024, backupCount=5),
         logging.StreamHandler()
     ]
 )
@@ -60,6 +64,8 @@ logging.getLogger('urllib3').setLevel(logging.ERROR)
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+ACTIVE_SITE_URL = None
 
 _SERIE_URL_RE = re.compile(r'/serie/[^/]+')
 
@@ -76,9 +82,9 @@ _MODE_LABELS = {
 
 
 def print_header():
-    print("\n" + "="*60)
+    print("" + "=" * 60)
     print("  S.TO SERIES SCRAPER & INDEX MANAGER  (httpx)")
-    print("="*60 + "\n")
+    print("=" * 60)
 
 
 def print_completed_series_alerts(index_manager=None):
@@ -117,9 +123,11 @@ def print_completed_series_alerts(index_manager=None):
             print("  Consider subscribing or leaving as-is.")
             print("⚠" * 35)
 
-            rescrape = input("\nRescrape these series to update Sub/WL status? (y/n): ").strip().lower()
+            rescrape = input(
+                "\nRescrape these series to update Sub/WL status? (y/n): ").strip().lower()
             if rescrape == 'y':
-                urls = [s.get('url') for s in completed_not_sub if s.get('url')]
+                urls = [s.get('url')
+                        for s in completed_not_sub if s.get('url')]
                 if not urls:
                     print("✗ No URLs found for these series")
                 else:
@@ -153,7 +161,8 @@ def check_disk_space(min_mb=100):
         available_mb = stat.free / (1024 * 1024)
         if available_mb < min_mb:
             print("\n✗ WARNING: Low disk space!")
-            print(f"  Available: {available_mb:.1f} MB (minimum needed: {min_mb} MB)")
+            print(
+                f"  Available: {available_mb:.1f} MB (minimum needed: {min_mb} MB)")
             print("  Please free up disk space before scraping.\n")
             return False
         return True
@@ -201,7 +210,8 @@ def _check_checkpoint(expected_mode):
         choice = input("Resume from checkpoint? (y/n): ").strip().lower()
         if choice == 'y':
             return {'ok': True, 'resume': True}
-        discard = input("Discard old checkpoint and start fresh? (y/n): ").strip().lower()
+        discard = input(
+            "Discard old checkpoint and start fresh? (y/n): ").strip().lower()
         if discard == 'y':
             try:
                 os.remove(checkpoint_file)
@@ -212,7 +222,8 @@ def _check_checkpoint(expected_mode):
 
     print(f"\n⚠ A checkpoint exists from a different mode: \"{saved_label}\"")
     print(f"   You are about to run: \"{expected_label}\"\n")
-    discard = input("Discard the old checkpoint and continue? (y/n): ").strip().lower()
+    discard = input(
+        "Discard the old checkpoint and continue? (y/n): ").strip().lower()
     if discard == 'y':
         try:
             os.remove(checkpoint_file)
@@ -220,6 +231,175 @@ def _check_checkpoint(expected_mode):
             pass
         return {'ok': True, 'resume': False}
     return {'ok': False, 'resume': False}
+
+
+def _probe_sites_before_scrape(scraper):
+    """Probe configured hosts, show OK/FAILED, and auto-select the first working one.
+
+    This function is always called from a synchronous context (the main menu loop),
+    so asyncio.run() is the correct way to execute async coroutines here.
+    """
+    global ACTIVE_SITE_URL  # pylint: disable=global-statement
+    site_urls = SITE_URLS or [SITE_URL]
+    if not site_urls:
+        return SITE_URL
+
+    print("\n→ Checking host availability...\n")
+    try:
+        results = asyncio.run(scraper.probe_sites(site_urls))
+    except Exception as exc:
+        print(f"  ✗ Probe failed: {exc}")
+        scraper.site_url = SITE_URL
+        ACTIVE_SITE_URL = scraper.site_url
+        return scraper.site_url
+
+    ok_hosts = []
+    host_counts = {}
+    for entry in results:
+        label = urlparse(entry['site_url']).netloc
+        status = "OK" if entry.get("ok") else "FAILED"
+        print(f"  - {label}: {status}")
+        if entry.get("ok"):
+            ok_hosts.append(entry['site_url'])
+            site_slugs = None
+            try:
+                site_slugs = asyncio.run(
+                    scraper.get_series_slugs_for_site(entry['site_url']))
+            except Exception as exc:
+                logger.warning(
+                    "Could not fetch series slugs for %s: %s", entry['site_url'], exc)
+            count = len(site_slugs) if site_slugs is not None else None
+            host_counts[entry['site_url']] = count
+            if count is None:
+                print("    Series count: unavailable")
+            else:
+                print(f"    Series count: {count}")
+                # Cross-check with local index
+                try:
+                    idx_mgr = IndexManager(SERIES_INDEX_FILE)
+                    idx_count = len(idx_mgr.series_index)
+                    if idx_count > 0:
+                        match = count == idx_count
+                        diff = count - idx_count
+                        if match:
+                            print(
+                                f"    Index count: {idx_count}  →  match = True")
+                        elif site_slugs is None:
+                            print(
+                                f"    Index count: {idx_count}  →  match = False ({diff:+d} difference)")
+                            print(
+                                "    ⚠ Cannot compare slugs because site slug list is unavailable.")
+                        else:
+                            sign = '+' if diff > 0 else ''
+                            print(
+                                f"    Index count: {idx_count}  →  match = False ({sign}{diff} difference)")
+                            # Fetch site slugs and compare to identify mismatched series
+                            try:
+                                index_slugs_list = []
+                                index_entries_without_slug = []
+                                for title, s in idx_mgr.series_index.items():
+                                    slug = _extract_slug(s)
+                                    if slug:
+                                        index_slugs_list.append(slug)
+                                    else:
+                                        index_entries_without_slug.append({
+                                            'title': s.get('title', title),
+                                            'link': s.get('link', ''),
+                                            'url': s.get('url', ''),
+                                        })
+                                index_slugs = set(index_slugs_list)
+                                from collections import Counter
+                                index_slug_counts = Counter(index_slugs_list)
+                                index_duplicates = {
+                                    slug: n for slug, n in index_slug_counts.items() if n > 1}
+                                only_in_index = index_slugs - site_slugs
+                                only_on_site = site_slugs - index_slugs
+                                has_real_mismatch = bool(
+                                    only_in_index or index_duplicates)
+                                report_path = os.path.join(
+                                    DATA_DIR, 'mismatch_report.json')
+                                if has_real_mismatch:
+                                    report = {
+                                        'generated': datetime.now().isoformat(),
+                                        'site_count': count,
+                                        'index_count': idx_count,
+                                        'index_unique_slugs': len(index_slugs),
+                                        'site_unique_slugs': len(site_slugs),
+                                        'index_entries_without_slug_count': len(index_entries_without_slug),
+                                        'only_in_index': sorted(only_in_index),
+                                        'only_on_site': sorted(only_on_site),
+                                        'index_duplicates': index_duplicates,
+                                        'index_entries_without_slug': index_entries_without_slug,
+                                    }
+                                    with open(report_path, 'w', encoding='utf-8') as f:
+                                        json.dump(report, f, indent=2,
+                                                  ensure_ascii=False)
+                                    print(
+                                        f"    📄 Mismatch report saved: {report_path}")
+                                    logger.info(
+                                        "Mismatch report saved: %d only-in-index, %d only-on-site, %d index duplicates",
+                                        len(only_in_index), len(only_on_site), len(index_duplicates))
+                                else:
+                                    if os.path.exists(report_path):
+                                        os.remove(report_path)
+                                    print(
+                                        "    ℹ Index has fewer series than site — expected if not all series were scraped yet. No mismatch report created.")
+                                    logger.info(
+                                        "Index count %d is below site count %d; no mismatch report generated",
+                                        idx_count, count)
+                                if index_duplicates:
+                                    dup_extra = sum(
+                                        index_duplicates.values()) - len(index_duplicates)
+                                    print(
+                                        f"    ⚠ Found {len(index_duplicates)} duplicate slug(s) in index (extra count: {dup_extra})")
+                                    print("    Duplicate slugs:")
+                                    for dup_slug in sorted(index_duplicates):
+                                        print(f"      - {dup_slug}")
+                                    choice = input(
+                                        "\nDelete duplicate index entries? (y/n): ").strip().lower()
+                                    if choice == 'y':
+                                        removed_titles = []
+                                        for title, series in list(idx_mgr.series_index.items()):
+                                            slug = _extract_slug(series)
+                                            if slug in index_duplicates:
+                                                removed_titles.append(title)
+                                                del idx_mgr.series_index[title]
+                                        idx_mgr.save_index()
+                                        print(
+                                            f"    🗑 Removed {len(removed_titles)} duplicate entries. Run 'Fetch new series' to rescrape them.")
+                                        logger.info(
+                                            "Removed %d duplicate index entries: %s",
+                                            len(removed_titles), sorted(index_duplicates))
+                                if not only_in_index and not only_on_site and not index_duplicates:
+                                    print(
+                                        "    ⚠ Counts differ but slug sets match and no duplicates — possible slug normalization mismatch.")
+                            except Exception as e:
+                                print(
+                                    f"    ⚠ Could not generate mismatch report: {e}")
+                                logger.exception(
+                                    "Could not generate mismatch report")
+                except Exception as e:
+                    print(f"  ⚠ Could not cross-check index: {e}")
+                    logger.exception("Could not cross-check index")
+
+    if ok_hosts:
+        scraper.site_url = ok_hosts[0]
+        print(f"\n→ Active host: {scraper.site_url}")
+    else:
+        scraper.site_url = SITE_URL
+        print(f"\n→ Active host: {scraper.site_url} (default)")
+
+    if len(ok_hosts) >= 2:
+        counts = [host_counts.get(
+            host) for host in ok_hosts if host_counts.get(host) is not None]
+        if len(counts) == len(ok_hosts) and counts:
+            match = all(count == counts[0] for count in counts[1:])
+            print(f"\n→ Series count comparison: match = {match}")
+        else:
+            print("\n→ Series count comparison: match = False")
+
+    ACTIVE_SITE_URL = scraper.site_url
+    return scraper.site_url
 
 
 def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
@@ -232,8 +412,13 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
         vanished_scope: Override scope for show_vanished_series (default: auto-detect).
     """
     pre_index = IndexManager(SERIES_INDEX_FILE) if pre_save_hook else None
+    t_start = time.perf_counter()
     try:
         scraper = SToScraper()
+        if ACTIVE_SITE_URL:
+            scraper.site_url = ACTIVE_SITE_URL
+        else:
+            _probe_sites_before_scrape(scraper)
         scraper.run(**run_kwargs)
 
         if scraper.series_data:
@@ -243,8 +428,10 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
             index_manager = IndexManager(SERIES_INDEX_FILE)
 
             if scraper.all_discovered_series is not None:
-                all_slugs = {_extract_slug(s) for s in scraper.all_discovered_series} - {None}
-                scope = vanished_scope or ('new_only' if run_kwargs.get('new_only') else 'all')
+                all_slugs = {_extract_slug(
+                    s) for s in scraper.all_discovered_series} - {None}
+                scope = vanished_scope or (
+                    'new_only' if run_kwargs.get('new_only') else 'all')
                 show_vanished_series(
                     index_manager.series_index, all_slugs, scope,
                     index_file=SERIES_INDEX_FILE,
@@ -253,11 +440,13 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
                 # Always reload: show_vanished_series may have deleted entries from disk
                 index_manager.load_index()
 
-            result = confirm_and_save_changes(scraper.series_data, description, index_manager)
+            result = confirm_and_save_changes(
+                scraper.series_data, description, index_manager)
             if isinstance(result, dict) and result.get('rescrape'):
                 # User already confirmed deletion in the integrity dialog — proceed directly
                 n = len(result['urls'])
-                print(f"\n→ Deleting {n} critical series from index before rescraping...")
+                print(
+                    f"\n→ Deleting {n} critical series from index before rescraping...")
                 remove_series_from_index(SERIES_INDEX_FILE, result['titles'])
                 print(f"\n→ Rescraping {n} critical series...\n")
                 _run_scrape_and_save(
@@ -270,6 +459,19 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
                 print(f"\n✓ {success_msg}")
                 print_completed_series_alerts(index_manager)
                 logger.info(success_msg)
+                # Final cross-check: scraped count vs index count (full scrapes only)
+                if scraper.all_discovered_series is not None:
+                    scraped_count = len(scraper.series_data)
+                    idx_count = len(index_manager.series_index)
+                    if scraped_count == idx_count:
+                        print(f"  Index count: {idx_count}  →  match = True")
+                    else:
+                        diff = scraped_count - idx_count
+                        sign = '+' if diff > 0 else ''
+                        print(
+                            f"  Index count: {idx_count}  →  match = False ({sign}{diff} difference)")
+                        print(
+                            "  → Run a full scrape (option 1) to detect vanished/renamed series.")
         else:
             if run_kwargs.get('retry_failed') and scraper.failed_links:
                 n = len(scraper.failed_links)
@@ -291,15 +493,20 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
             print("\n⚠ Scraping was paused — checkpoint preserved for resume.")
 
         if scraper.failed_links:
-            print(f"\n⚠ {len(scraper.failed_links)} series failed during scraping.")
+            print(
+                f"\n⚠ {len(scraper.failed_links)} series failed during scraping.")
             print("→ Use option 7 (Retry failed series) to rescrape these later.")
+
+        t_elapsed = time.perf_counter() - t_start
+        print(f"\n⏱ Scrape duration: {t_elapsed / 60:.1f}m ({t_elapsed:.1f}s)")
 
         return scraper
     except (KeyboardInterrupt, SystemExit):
         print("\n⚠ Scraping interrupted by Ctrl+C")
         if 'scraper' in locals() and scraper.series_data:
             index_manager = IndexManager(SERIES_INDEX_FILE)
-            result = confirm_and_save_changes(scraper.series_data, description, index_manager)
+            result = confirm_and_save_changes(
+                scraper.series_data, description, index_manager)
             if isinstance(result, dict) and result.get('rescrape'):
                 remove_series_from_index(SERIES_INDEX_FILE, result['titles'])
                 for url, title in zip(result['urls'], result['titles']):
@@ -308,11 +515,14 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
                         'link': '', 'reason': 'integrity_check_failed',
                     })
                 scraper.save_failed_series()
-                print(f"\n✓ {len(result['urls'])} critical series removed from index and added to retry list.")
+                print(
+                    f"\n✓ {len(result['urls'])} critical series removed from index and added to retry list.")
                 print("→ Use option 7 (Retry failed series) to rescrape these.")
-                logger.info("Critical series removed from index and added to retry list after Ctrl+C")
+                logger.info(
+                    "Critical series removed from index and added to retry list after Ctrl+C")
             elif result:
-                print(f"\n✓ Partial data saved ({len(scraper.series_data)} series)")
+                print(
+                    f"\n✓ Partial data saved ({len(scraper.series_data)} series)")
                 logger.info("%s interrupted — partial data saved", description)
         if 'scraper' in locals() and scraper.failed_links:
             print(f"\n⚠ {len(scraper.failed_links)} series failed.")
@@ -394,7 +604,8 @@ def scrape_unwatched():
         print("✓ All series are fully watched! Nothing to scrape.")
         return
 
-    print(f"  Found {len(unwatched_urls)} unwatched/ongoing series (skipping {skipped} fully watched)\n")
+    print(
+        f"  Found {len(unwatched_urls)} unwatched/ongoing series (skipping {skipped} fully watched)\n")
 
     chk = _check_checkpoint('unwatched')
     if not chk['ok']:
@@ -544,7 +755,8 @@ def _show_ongoing_and_export(report, index_manager):
     if ongoing_count > 10:
         print(f"  ... and {ongoing_count - 10} more\n")
 
-    export = input(f"\nExport {ongoing_count} ongoing series URLs to series_urls.txt? (y/n): ").strip().lower()
+    export = input(
+        f"\nExport {ongoing_count} ongoing series URLs to series_urls.txt? (y/n): ").strip().lower()
     if export == 'y':
         try:
             urls = []
@@ -553,11 +765,12 @@ def _show_ongoing_and_export(report, index_manager):
                 url = series_data.get('url') or series_data.get('link')
                 if url:
                     if not url.startswith('http'):
-                        url = f"https://s.to{url}"
+                        url = f"{SITE_URL}{url}"
                     urls.append(url)
 
             if urls:
-                urls_file = os.path.join(os.path.dirname(__file__), 'series_urls.txt')
+                urls_file = os.path.join(
+                    os.path.dirname(__file__), 'series_urls.txt')
                 with open(urls_file, 'w', encoding='utf-8') as f:
                     f.write('\n'.join(urls) + '\n')
                 print(f"\n✓ Exported {len(urls)} URLs to series_urls.txt")
@@ -583,21 +796,26 @@ def _print_report_summary(report, report_file, filter_name=None):
     print(header)
     print("-"*70)
     print(f"  Total series:        {stats['total_series']}")
-    print(f"  Completed (100%):    {stats.get('completed_count', stats['watched'])}")
-    print(f"  Ongoing (started):   {stats.get('ongoing_count', ongoing_count)}")
+    print(
+        f"  Completed (100%):    {stats.get('completed_count', stats['watched'])}")
+    print(
+        f"  Ongoing (started):   {stats.get('ongoing_count', ongoing_count)}")
     if waiting_count > 0:
         print(f"  Waiting for new eps: {waiting_count}")
-    print(f"  Not started (0%):    {stats.get('not_started_count', not_started_count)}")
+    print(
+        f"  Not started (0%):    {stats.get('not_started_count', not_started_count)}")
     if not_started_sub_wl_count > 0:
         print(f"  Not started (Sub/WL):{not_started_sub_wl_count}")
     print(f"  Total episodes:      {stats['total_episodes']}")
     print(f"  Watched episodes:    {stats['watched_episodes']}")
     print(f"  Unwatched episodes:  {stats.get('unwatched_episodes', 0)}")
-    print(f"  Avg episodes/series: {stats.get('average_episodes_per_series', 0)}")
+    print(
+        f"  Avg episodes/series: {stats.get('average_episodes_per_series', 0)}")
     print(f"  Average completion:  {stats['average_completion']:.1f}%")
     print(f"  Subscribed:          {stats.get('subscribed_count', 0)}")
     print(f"  Watchlist:           {stats.get('watchlist_count', 0)}")
-    print(f"  Both (Sub+WL):       {stats.get('both_subscribed_and_watchlist', 0)}")
+    print(
+        f"  Both (Sub+WL):       {stats.get('both_subscribed_and_watchlist', 0)}")
 
     dist = stats.get('completion_distribution', {})
     if dist:
@@ -609,13 +827,15 @@ def _print_report_summary(report, report_file, filter_name=None):
     if most:
         print(f"\n  Most Completed Ongoing (top {len(most)}):")
         for i, s in enumerate(most, 1):
-            print(f"    {i}. {s['title']} — {s['completion']:.1f}% ({s['progress']})")
+            print(
+                f"    {i}. {s['title']} — {s['completion']:.1f}% ({s['progress']})")
 
     least = stats.get('least_completed_series', [])
     if least:
         print(f"  Least Completed Ongoing (bottom {len(least)}):")
         for i, s in enumerate(least, 1):
-            print(f"    {i}. {s['title']} — {s['completion']:.1f}% ({s['progress']})")
+            print(
+                f"    {i}. {s['title']} — {s['completion']:.1f}% ({s['progress']})")
 
     print(f"\n  Saved to:            {report_file}")
     print("-"*70 + "\n")
@@ -661,21 +881,25 @@ def generate_report():
 
             if sub_choice == '1':
                 print("\n→ Generating report for subscribed series...")
-                report = index_manager.get_full_report(filter_subscribed=True, filter_watchlist=False)
+                report = index_manager.get_full_report(
+                    filter_subscribed=True, filter_watchlist=False)
                 filter_name = "subscribed_only"
             elif sub_choice == '2':
                 print("\n→ Generating report for watchlist series...")
-                report = index_manager.get_full_report(filter_subscribed=False, filter_watchlist=True)
+                report = index_manager.get_full_report(
+                    filter_subscribed=False, filter_watchlist=True)
                 filter_name = "watchlist_only"
             elif sub_choice == '3':
                 print("\n→ Generating report for subscribed AND watchlist...")
-                report = index_manager.get_full_report(filter_subscribed=True, filter_watchlist=True)
+                report = index_manager.get_full_report(
+                    filter_subscribed=True, filter_watchlist=True)
                 filter_name = "both_subscribed_watchlist"
             else:
                 print("⚠ Invalid choice")
                 return
 
-            report_file = os.path.join(DATA_DIR, f'series_report_{filter_name}.json')
+            report_file = os.path.join(
+                DATA_DIR, f'series_report_{filter_name}.json')
             with open(report_file, 'w', encoding='utf-8') as f:
                 json.dump(report, f, indent=2, ensure_ascii=False)
             _print_report_summary(report, report_file, filter_name)
@@ -693,9 +917,12 @@ def generate_report():
 
 def _inject_disappeared_series(scraper, pre_index, source):
     """Inject stubs for series no longer on account pages so merge can prompt."""
-    discovered_slugs = {_extract_slug(s) for s in (scraper.all_discovered_series or [])} - {None}
-    failed_slugs = {_extract_slug(fl) for fl in scraper.failed_links if isinstance(fl, dict)} - {None}
-    scraped_titles = {s.get('title') for s in scraper.series_data if s.get('title')}
+    discovered_slugs = {_extract_slug(s) for s in (
+        scraper.all_discovered_series or [])} - {None}
+    failed_slugs = {_extract_slug(
+        fl) for fl in scraper.failed_links if isinstance(fl, dict)} - {None}
+    scraped_titles = {s.get('title')
+                      for s in scraper.series_data if s.get('title')}
 
     for field, sources in [('watchlist', ('watchlist', 'both')), ('subscribed', ('subscribed', 'both'))]:
         if source not in sources:
@@ -720,7 +947,8 @@ def _inject_disappeared_series(scraper, pre_index, source):
                 scraped_titles.add(title)
             injected.append(title)
         if injected:
-            print(f"\n  ⚠ {len(injected)} series no longer {field} (will prompt for confirmation):")
+            print(
+                f"\n  ⚠ {len(injected)} series no longer {field} (will prompt for confirmation):")
             for name in injected:
                 print(f"    • {name}")
 
@@ -775,7 +1003,8 @@ def retry_failed_series():
     print("\n→ Starting retry in sequential mode (for reliability)...")
 
     _run_scrape_and_save(
-        run_kwargs={'retry_failed': True, 'parallel': False, 'resume_only': resume},
+        run_kwargs={'retry_failed': True,
+                    'parallel': False, 'resume_only': resume},
         description="Retry data",
         success_msg="Retry completed successfully!",
         no_data_msg="No data from retry",
@@ -807,6 +1036,9 @@ def main():
         response = input("Continue anyway? (y/n): ").strip().lower()
         if response != 'y':
             sys.exit(1)
+
+    scraper = SToScraper()
+    _probe_sites_before_scrape(scraper)
 
     while True:
         show_menu()

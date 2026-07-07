@@ -16,6 +16,9 @@ import tempfile
 import time
 from collections import defaultdict
 from datetime import datetime
+from urllib.parse import urlparse
+
+from config.config import SITE_URL, VALID_SERIES_HOSTS
 
 logger = logging.getLogger(__name__)
 
@@ -39,20 +42,33 @@ def _is_pid_alive(pid):
 # Pre-compiled regex for season number extraction
 _SEASON_NUMBER_RE = re.compile(r'(staffel|season|s)\s*(\d+)', re.IGNORECASE)
 
-# Pre-compiled regex for valid s.to series URL/path
-_VALID_SERIES_URL_RE = re.compile(r'^https://s\.to/serie/[^/]+/?$')
+# Pre-compiled regex for valid series path
 _VALID_SERIES_PATH_RE = re.compile(r'^/serie/[^/]+/?$')
 
 
 def _is_valid_series_url(url):
-    """Check if a URL is a valid s.to series URL or relative path.
+    """Check if a URL is a valid series URL or relative path.
 
     Rejects dangerous schemes (javascript:, data:, file://) and
-    only allows https://s.to/serie/... or /serie/... paths.
+    allows only configured s.to-compatible hosts and /serie/... paths.
     """
     if not url or not isinstance(url, str):
         return False
-    return bool(_VALID_SERIES_URL_RE.match(url) or _VALID_SERIES_PATH_RE.match(url))
+
+    if _VALID_SERIES_PATH_RE.match(url):
+        return True
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+
+    if parsed.scheme not in ('http', 'https'):
+        return False
+    # If VALID_SERIES_HOSTS is empty (config not loaded yet), accept any host
+    if VALID_SERIES_HOSTS and parsed.netloc not in VALID_SERIES_HOSTS:
+        return False
+    return bool(_VALID_SERIES_PATH_RE.match(parsed.path))
 
 
 class FileLock:
@@ -61,6 +77,7 @@ class FileLock:
     Uses a .lock file to indicate exclusive access. Waits for lock with timeout.
     Works cross-platform (Windows, Linux, Mac).
     """
+
     def __init__(self, filepath, timeout=10, poll_interval=0.1):
         self.filepath = filepath
         self.lock_file = filepath + '.lock'
@@ -73,7 +90,8 @@ class FileLock:
         start = time.time()
         while time.time() - start < self.timeout:
             try:
-                fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                fd = os.open(self.lock_file, os.O_CREAT |
+                             os.O_EXCL | os.O_WRONLY)
                 os.write(fd, f"{os.getpid()}\n".encode())
                 os.close(fd)
                 self.lock_acquired = True
@@ -82,13 +100,15 @@ class FileLock:
                 time.sleep(self.poll_interval)
 
         if self._is_lock_stale():
-            logger.warning("Removing stale lock on %s (owner process dead)", self.filepath)
+            logger.warning(
+                "Removing stale lock on %s (owner process dead)", self.filepath)
             try:
                 os.remove(self.lock_file)
             except OSError:
                 pass
             try:
-                fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                fd = os.open(self.lock_file, os.O_CREAT |
+                             os.O_EXCL | os.O_WRONLY)
                 os.write(fd, f"{os.getpid()}\n".encode())
                 os.close(fd)
                 self.lock_acquired = True
@@ -96,7 +116,8 @@ class FileLock:
             except (OSError, FileExistsError):
                 pass
 
-        logger.warning("Could not acquire lock on %s after %ss", self.filepath, self.timeout)
+        logger.warning("Could not acquire lock on %s after %ss",
+                       self.filepath, self.timeout)
         return False
 
     def _is_lock_stale(self):
@@ -189,11 +210,13 @@ def _validate_series_entry(series, title=''):
         logger.warning("Skipping series '%s' - missing 'url' field", title)
         return False
     if not _is_valid_series_url(url):
-        logger.warning("Skipping series '%s' - invalid URL scheme/format: %s", title, url[:80])
+        logger.warning(
+            "Skipping series '%s' - invalid URL scheme/format: %s", title, url[:80])
         return False
     seasons = series.get('seasons')
     if seasons is not None and not isinstance(seasons, list):
-        logger.warning("Skipping series '%s' - 'seasons' must be list, got %s", title, type(seasons))
+        logger.warning(
+            "Skipping series '%s' - 'seasons' must be list, got %s", title, type(seasons))
         return False
     for season in (seasons or []):
         if not isinstance(season, dict):
@@ -253,7 +276,8 @@ def paginate_list(items, formatter, page_size=50):
             print(formatter(item))
         idx = end
         if idx < total:
-            choice = input(f"  ({idx}/{total}) Enter = more, q = skip: ").strip().lower()
+            choice = input(
+                f"  ({idx}/{total}) Enter = more, q = skip: ").strip().lower()
             if choice == 'q':
                 print(f"  ... skipped {total - idx} remaining")
                 break
@@ -288,10 +312,12 @@ def group_episodes_by_season(episode_list, new_data, prefix='[+]'):
         series = new_data_dict.get(title, {})
         total_in_season, _ = _get_season_stats(series, season)
         if total_in_season > 0:
-            result.append(f"  {prefix} {title} [{season}]: {len(ep_nums)}/{total_in_season} episodes")
+            result.append(
+                f"  {prefix} {title} [{season}]: {len(ep_nums)}/{total_in_season} episodes")
         else:
             for ep_num in sorted(ep_nums):
-                result.append(f"  {prefix} {title} {format_season_ep(season, ep_num)}")
+                result.append(
+                    f"  {prefix} {title} {format_season_ep(season, ep_num)}")
     return result
 
 
@@ -322,7 +348,8 @@ def _detect_housekeeping_changes(old_data, new_dict):
             o_season = old_seasons.get(label)
             if not o_season:
                 continue
-            old_has_ep0 = any(ep.get('number') == 0 for ep in o_season.get('episodes', []))
+            old_has_ep0 = any(ep.get('number') ==
+                              0 for ep in o_season.get('episodes', []))
             old_flag = o_season.get('ignored_episode_0', False)
             new_flag = new_season.get('ignored_episode_0', False)
             if (old_has_ep0 and new_flag) or (not old_flag and new_flag):
@@ -398,7 +425,8 @@ def detect_changes(old_data, new_data):
         for season in old_series.get('seasons', []):
             s_label = season.get('season', '')
             for ep in season.get('episodes', []):
-                old_eps[(s_label, str(ep.get('number')))] = ep.get('watched', False)
+                old_eps[(s_label, str(ep.get('number')))
+                        ] = ep.get('watched', False)
 
         for season in new_series.get('seasons', []):
             s_label = season.get('season', '')
@@ -411,9 +439,11 @@ def detect_changes(old_data, new_data):
                     changes["new_episodes"].append((title, s_label, ep_num))
                 elif old_eps[ep_key] != new_watched:
                     if not old_eps[ep_key] and new_watched:
-                        changes["newly_watched"].append((title, s_label, ep_num))
+                        changes["newly_watched"].append(
+                            (title, s_label, ep_num))
                     elif old_eps[ep_key] and not new_watched:
-                        changes["newly_unwatched"].append((title, s_label, ep_num))
+                        changes["newly_unwatched"].append(
+                            (title, s_label, ep_num))
 
     return changes
 
@@ -471,43 +501,57 @@ def show_changes(changes, include_unwatched=True, include_watched=True,
 
     if changes["new_episodes"]:
         if new_data:
-            grouped_lines = group_episodes_by_season(changes["new_episodes"], new_data)
+            grouped_lines = group_episodes_by_season(
+                changes["new_episodes"], new_data)
             print(f"\n[NEW EPISODES] ({len(changes['new_episodes'])})")
             paginate_list(grouped_lines, lambda line: line)
         else:
             print(f"\n[NEW EPISODES] ({len(changes['new_episodes'])})")
-            paginate_list(changes["new_episodes"], lambda x: f"  + {x[0]} [{x[1]}] Ep {x[2]}")
+            paginate_list(changes["new_episodes"],
+                          lambda x: f"  + {x[0]} [{x[1]}] Ep {x[2]}")
 
     if changes["newly_watched"] and include_watched:
         print(f"\n[NEWLY WATCHED] ({len(changes['newly_watched'])} episodes)")
-        watched_lines = group_episodes_by_season(changes["newly_watched"], new_data)
+        watched_lines = group_episodes_by_season(
+            changes["newly_watched"], new_data)
         paginate_list(watched_lines, lambda line: line)
 
     if changes.get("newly_unwatched") and include_unwatched:
-        print(f"\n[SITE REPORTS UNWATCHED] ({len(changes['newly_unwatched'])} episodes)")
-        unwatched_lines = group_episodes_by_season(changes["newly_unwatched"], new_data, prefix='[!]')
+        print(
+            f"\n[SITE REPORTS UNWATCHED] ({len(changes['newly_unwatched'])} episodes)")
+        unwatched_lines = group_episodes_by_season(
+            changes["newly_unwatched"], new_data, prefix='[!]')
         paginate_list(unwatched_lines, lambda line: line)
 
     sub_wl_items = []
     if changes.get("newly_subscribed") and include_subscribe:
-        sub_wl_items.extend([(title, "Sub", "✗", "✓") for title in changes["newly_subscribed"]])
+        sub_wl_items.extend([(title, "Sub", "✗", "✓")
+                            for title in changes["newly_subscribed"]])
     if changes.get("newly_unsubscribed") and include_unsubscribe:
-        sub_wl_items.extend([(title, "Sub", "✓", "✗") for title in changes["newly_unsubscribed"]])
+        sub_wl_items.extend([(title, "Sub", "✓", "✗")
+                            for title in changes["newly_unsubscribed"]])
     if changes.get("watchlist_added") and include_watchlist_add:
-        sub_wl_items.extend([(title, "WL", "✗", "✓") for title in changes["watchlist_added"]])
+        sub_wl_items.extend([(title, "WL", "✗", "✓")
+                            for title in changes["watchlist_added"]])
     if changes.get("watchlist_removed") and include_watchlist_remove:
-        sub_wl_items.extend([(title, "WL", "✓", "✗") for title in changes["watchlist_removed"]])
+        sub_wl_items.extend([(title, "WL", "✓", "✗")
+                            for title in changes["watchlist_removed"]])
     if sub_wl_items:
         print(f"\n[SUBSCRIPTION / WATCHLIST CHANGES] ({len(sub_wl_items)})")
-        paginate_list(sub_wl_items, lambda x: f"  ~ {x[0]}: {x[1]}: {x[2]} → {x[3]}")
+        paginate_list(
+            sub_wl_items, lambda x: f"  ~ {x[0]}: {x[1]}: {x[2]} → {x[3]}")
 
     if changes.get("title_ger_changed"):
-        print(f"\n[GERMAN TITLE CHANGED] ({len(changes['title_ger_changed'])} series)")
-        paginate_list(changes["title_ger_changed"], lambda x: f"  [~] {x[0]}: '{x[1]}' → '{x[2]}'")
+        print(
+            f"\n[GERMAN TITLE CHANGED] ({len(changes['title_ger_changed'])} series)")
+        paginate_list(changes["title_ger_changed"],
+                      lambda x: f"  [~] {x[0]}: '{x[1]}' → '{x[2]}'")
 
     if changes.get("title_eng_changed"):
-        print(f"\n[ENGLISH TITLE CHANGED] ({len(changes['title_eng_changed'])} series)")
-        paginate_list(changes["title_eng_changed"], lambda x: f"  [~] {x[0]}: '{x[1]}' → '{x[2]}'")
+        print(
+            f"\n[ENGLISH TITLE CHANGED] ({len(changes['title_eng_changed'])} series)")
+        paginate_list(changes["title_eng_changed"],
+                      lambda x: f"  [~] {x[0]}: '{x[1]}' → '{x[2]}'")
 
     print("\n" + "="*70)
     return total
@@ -533,7 +577,8 @@ class IndexManager:
                 with open(self.index_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     if isinstance(data, list):
-                        self.series_index = {s.get('title'): s for s in data if s.get('title') and isinstance(s, dict)}
+                        self.series_index = {s.get('title'): s for s in data if s.get(
+                            'title') and isinstance(s, dict)}
                     elif isinstance(data, dict):
                         first_item = next(iter(data.values()), None)
                         if first_item and isinstance(first_item, dict) and first_item.get('title'):
@@ -550,10 +595,11 @@ class IndexManager:
                             validated_index[title] = series
                     self.series_index = validated_index
                     if not self.series_index:
-                        logger.warning("Loaded index is empty or contains no valid series")
+                        logger.warning(
+                            "Loaded index is empty or contains no valid series")
 
-                print(f"[OK] Loaded {len(self.series_index)} series from index")
-                logger.info("Loaded index with %d series", len(self.series_index))
+                print(
+                    f"[OK] Loaded {len(self.series_index)} series from index")
             except json.JSONDecodeError as e:
                 print(f"[ERROR] Index file corrupted: {e}")
                 logger.error("Index file corrupted: %s", e)
@@ -573,7 +619,8 @@ class IndexManager:
             try:
                 series_list = list(self.series_index.values())
                 _atomic_write_json(self.index_file, series_list)
-                logger.info("Saved index with %d series", len(self.series_index))
+                logger.info("Saved index with %d series",
+                            len(self.series_index))
             except Exception as e:
                 print(f"[ERROR] Failed to save index: {e}")
                 logger.error("Error saving index: %s", e)
@@ -585,7 +632,8 @@ class IndexManager:
         for s in self.series_index.values():
             total_eps, watched_eps = get_episode_counts(s)
             is_incomplete = (total_eps == 0) or (watched_eps < total_eps)
-            completion = round((watched_eps / total_eps) * 100, 2) if total_eps > 0 else 0.0
+            completion = round((watched_eps / total_eps) *
+                               100, 2) if total_eps > 0 else 0.0
             series_list.append({
                 'title': s.get('title', ''),
                 'watched_episodes': watched_eps,
@@ -611,18 +659,25 @@ class IndexManager:
                 'watched_percentage': 0.0,
             }
 
-        watched = sum(1 for s in series_with_progress if not s['is_incomplete'])
+        watched = sum(
+            1 for s in series_with_progress if not s['is_incomplete'])
         unwatched = total - watched
-        completion_percentages = [s['completion'] for s in series_with_progress]
+        completion_percentages = [s['completion']
+                                  for s in series_with_progress]
         avg_completion = round(sum(completion_percentages) / total, 2)
 
         total_episodes = sum(s['total_episodes'] for s in series_with_progress)
-        watched_episodes = sum(s['watched_episodes'] for s in series_with_progress)
-        avg_episodes_per_series = round(total_episodes / total, 1) if total > 0 else 0
+        watched_episodes = sum(s['watched_episodes']
+                               for s in series_with_progress)
+        avg_episodes_per_series = round(
+            total_episodes / total, 1) if total > 0 else 0
 
-        subscribed_count = sum(1 for s in series_with_progress if s['subscribed'])
-        watchlist_count = sum(1 for s in series_with_progress if s['watchlist'])
-        both_count = sum(1 for s in series_with_progress if s['subscribed'] and s['watchlist'])
+        subscribed_count = sum(
+            1 for s in series_with_progress if s['subscribed'])
+        watchlist_count = sum(
+            1 for s in series_with_progress if s['watchlist'])
+        both_count = sum(
+            1 for s in series_with_progress if s['subscribed'] and s['watchlist'])
 
         completion_distribution = {
             '0-25%': sum(1 for p in completion_percentages if 0 <= p < 25),
@@ -632,14 +687,17 @@ class IndexManager:
             '100%': sum(1 for p in completion_percentages if p == 100),
         }
 
-        ongoing_only = [s for s in series_with_progress if 0 < s['completion'] < 100]
-        sorted_ongoing = sorted(ongoing_only, key=lambda x: x['completion'], reverse=True)
+        ongoing_only = [s for s in series_with_progress if 0 <
+                        s['completion'] < 100]
+        sorted_ongoing = sorted(
+            ongoing_only, key=lambda x: x['completion'], reverse=True)
         most_completed = sorted_ongoing[:5]
         least_completed = sorted_ongoing[-5:] if sorted_ongoing else []
 
         completed_count = watched
         ongoing_count = len(ongoing_only)
-        not_started_count = sum(1 for s in series_with_progress if s['watched_episodes'] == 0)
+        not_started_count = sum(
+            1 for s in series_with_progress if s['watched_episodes'] == 0)
 
         return {
             'total_series': total,
@@ -682,9 +740,11 @@ class IndexManager:
             ]
         else:
             if filter_subscribed is not None:
-                series_progress = [s for s in series_progress if s['subscribed'] == filter_subscribed]
+                series_progress = [
+                    s for s in series_progress if s['subscribed'] == filter_subscribed]
             if filter_watchlist is not None:
-                series_progress = [s for s in series_progress if s['watchlist'] == filter_watchlist]
+                series_progress = [
+                    s for s in series_progress if s['watchlist'] == filter_watchlist]
 
         watched_series = [
             s for s in series_progress
@@ -707,16 +767,19 @@ class IndexManager:
             if s['watched_episodes'] == 0 and s['total_episodes'] > 0
             and (s.get('subscribed') or s.get('watchlist'))
         ]
-        not_started_sub_wl_sorted = sorted(not_started_sub_wl, key=lambda x: x['title'])
+        not_started_sub_wl_sorted = sorted(
+            not_started_sub_wl, key=lambda x: x['title'])
         surprise_series = [
             s for s in series_progress
             if s.get('subscribed') and not s.get('watchlist')
             and s['is_incomplete'] and s['watched_episodes'] > 0
         ]
-        surprise_sorted = sorted(surprise_series, key=lambda x: x['completion'], reverse=True)
+        surprise_sorted = sorted(
+            surprise_series, key=lambda x: x['completion'], reverse=True)
         waiting_sorted = sorted(waiting_for_new, key=lambda x: x['title'])
 
-        ongoing_sorted = sorted(ongoing_series, key=lambda x: x['completion'], reverse=True)
+        ongoing_sorted = sorted(
+            ongoing_series, key=lambda x: x['completion'], reverse=True)
 
         episode_ranges = {
             'short_series': [s['title'] for s in series_progress if s['total_episodes'] <= 5],
@@ -724,8 +787,10 @@ class IndexManager:
             'long_series': [s['title'] for s in series_progress if s['total_episodes'] > 25],
         }
 
-        near_completion = [s['title'] for s in ongoing_sorted if 80 <= s['completion'] < 100][:10]
-        stalled = [s['title'] for s in ongoing_sorted if s['completion'] < 25][:10]
+        near_completion = [s['title']
+                           for s in ongoing_sorted if 80 <= s['completion'] < 100][:10]
+        stalled = [s['title']
+                   for s in ongoing_sorted if s['completion'] < 25][:10]
 
         report = {
             'metadata': {
@@ -892,7 +957,8 @@ def _detect_episode_count_mismatches(old_data, new_dict):
         # 1. Check total episode count difference
         if old_total != new_total:
             diff = new_total - old_total
-            percent_diff = round((diff / max(old_total, new_total)), 3) * 100 if max(old_total, new_total) > 0 else 0
+            percent_diff = round((diff / max(old_total, new_total)), 3) * \
+                100 if max(old_total, new_total) > 0 else 0
             mismatch_details["issues"].append({
                 "type": "total_episode_count",
                 "old": old_total,
@@ -903,11 +969,14 @@ def _detect_episode_count_mismatches(old_data, new_dict):
             # Only flag EPISODE LOSS as critical (disappearance)
             # Episode additions are normal (weekly releases), not a warning
             if new_total < old_total:
-                mismatch_details["severity"] = "critical"  # Episodes disappeared
+                # Episodes disappeared
+                mismatch_details["severity"] = "critical"
 
         # 2. Check season count changes
-        old_seasons = {s.get('season'): s for s in old_entry.get('seasons', [])}
-        new_seasons = {s.get('season'): s for s in new_entry.get('seasons', [])}
+        old_seasons = {
+            s.get('season'): s for s in old_entry.get('seasons', [])}
+        new_seasons = {
+            s.get('season'): s for s in new_entry.get('seasons', [])}
 
         old_season_labels = set(old_seasons.keys())
         new_season_labels = set(new_seasons.keys())
@@ -956,14 +1025,18 @@ def _detect_episode_count_mismatches(old_data, new_dict):
         for season_label in old_season_labels & new_season_labels:
             old_season = old_seasons[season_label]
             new_season = new_seasons[season_label]
-            old_eps_by_num = {ep.get('number'): ep for ep in old_season.get('episodes', [])}
-            new_eps_by_num = {ep.get('number'): ep for ep in new_season.get('episodes', [])}
+            old_eps_by_num = {
+                ep.get('number'): ep for ep in old_season.get('episodes', [])}
+            new_eps_by_num = {
+                ep.get('number'): ep for ep in new_season.get('episodes', [])}
 
             for ep_num in old_eps_by_num.keys() & new_eps_by_num.keys():
                 old_ep = old_eps_by_num[ep_num]
                 new_ep = new_eps_by_num[ep_num]
-                old_title = old_ep.get('title_ger') or old_ep.get('title_eng') or old_ep.get('title', '')
-                new_title = new_ep.get('title_ger') or new_ep.get('title_eng') or new_ep.get('title', '')
+                old_title = old_ep.get('title_ger') or old_ep.get(
+                    'title_eng') or old_ep.get('title', '')
+                new_title = new_ep.get('title_ger') or new_ep.get(
+                    'title_eng') or new_ep.get('title', '')
 
                 if old_title and new_title and old_title != new_title:
                     title_changes.append({
@@ -1023,36 +1096,36 @@ def _detect_episode_count_mismatches(old_data, new_dict):
 
 def _extract_critical_series_for_rescrape(mismatches, old_data):
     """Extract critical series and their URLs for rescraping.
-    
+
     Returns:
         dict with 'urls', 'titles', and 'series' keys for critical issues
     """
     critical = [m for m in mismatches if m["severity"] == "critical"]
     if not critical:
         return {'urls': [], 'titles': [], 'series': {}}
-    
+
     if isinstance(old_data, list):
         old_map = {s.get('title'): s for s in old_data if s and s.get('title')}
     else:
         old_map = dict(old_data) if old_data else {}
-    
+
     urls = []
     titles = []
     series_data = {}
-    
+
     for mismatch in critical:
         title = mismatch['title']
         titles.append(title)
-        
+
         if title in old_map:
             entry = old_map[title]
             url = entry.get('url') or entry.get('link')
             if url:
                 if not url.startswith('http'):
-                    url = f"https://s.to{url}"
+                    url = f"{SITE_URL}{url}"
                 urls.append(url)
                 series_data[title] = entry
-    
+
     return {
         'urls': urls,
         'titles': titles,
@@ -1062,7 +1135,7 @@ def _extract_critical_series_for_rescrape(mismatches, old_data):
 
 def _prompt_episode_mismatches(mismatches, old_data=None):
     """Prompt user for warning/critical issues with option to delete & rescrape critical ones.
-    
+
     Returns:
         tuple: (proceed: bool, rescrape_data: dict or None)
         - proceed: Whether to merge despite issues
@@ -1085,25 +1158,33 @@ def _prompt_episode_mismatches(mismatches, old_data=None):
         lines = []
         if issue['type'] == 'season_structure_change':
             if issue.get('seasons_removed'):
-                lines.append(f"   → Seasons removed: {', '.join(issue['seasons_removed'])}")
+                lines.append(
+                    f"   → Seasons removed: {', '.join(issue['seasons_removed'])}")
             if issue.get('seasons_added'):
-                lines.append(f"   → Seasons added: {', '.join(issue['seasons_added'])}")
+                lines.append(
+                    f"   → Seasons added: {', '.join(issue['seasons_added'])}")
         elif issue['type'] == 'total_episode_count':
-            lines.append(f"   → Episodes: {issue['old']} → {issue['new']} ({issue['diff']:+d}, {issue['percent_diff']}%)")
+            lines.append(
+                f"   → Episodes: {issue['old']} → {issue['new']} ({issue['diff']:+d}, {issue['percent_diff']}%)")
         elif issue['type'] == 'per_season_episode_mismatch':
             for s in issue['seasons']:
-                lines.append(f"   → S{s['season']}: {s['old_count']} → {s['new_count']} eps ({s['diff']:+d})")
+                lines.append(
+                    f"   → S{s['season']}: {s['old_count']} → {s['new_count']} eps ({s['diff']:+d})")
         elif issue['type'] == 'watched_status_inconsistency':
-            lines.append(f"   → CORRUPTION: Watched ({issue['old_watched']}) > Total ({issue['new_total']})")
+            lines.append(
+                f"   → CORRUPTION: Watched ({issue['old_watched']}) > Total ({issue['new_total']})")
         elif issue['type'] == 'watched_count_drop':
             diff = issue['new_watched'] - issue['old_watched']
-            lines.append(f"   → Watched drop: {issue['old_watched']} → {issue['new_watched']} ({diff:+d})")
+            lines.append(
+                f"   → Watched drop: {issue['old_watched']} → {issue['new_watched']} ({diff:+d})")
         elif issue['type'] == 'episode_title_changes':
             lines.append(f"   → {issue['count']} episode title(s) changed")
             for s in issue.get('samples', []):
-                lines.append(f"     [{s['season']}] Ep {s['episode']}: \"{s['old_title']}\" → \"{s['new_title']}\"")
+                lines.append(
+                    f"     [{s['season']}] Ep {s['episode']}: \"{s['old_title']}\" → \"{s['new_title']}\"")
         elif issue['type'] == 'unwatched_calculation_mismatch':
-            lines.append(f"   → Calculation error: Expected unwatched {issue['expected']}, stored {issue['stored']}")
+            lines.append(
+                f"   → Calculation error: Expected unwatched {issue['expected']}, stored {issue['stored']}")
         else:
             lines.append(f"   → {issue['type']}")
         return lines
@@ -1123,15 +1204,19 @@ def _prompt_episode_mismatches(mismatches, old_data=None):
     # Write integrity check issues to file only (no console logging)
     if critical + warning:
         try:
-            log_file = os.path.join(os.path.dirname(__file__), '..', 'logs', 'integrity_check.log')
+            log_file = os.path.join(os.path.dirname(
+                __file__), '..', 'logs', 'integrity_check.log')
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
             with open(log_file, 'a', encoding='utf-8') as f:
                 f.write(f"\n[{datetime.now().isoformat()}] Integrity Check\n")
-                f.write(f"Critical: {len(critical)}, Warnings: {len(warning)}\n")
+                f.write(
+                    f"Critical: {len(critical)}, Warnings: {len(warning)}\n")
                 for m in critical:
-                    f.write(f"  CRITICAL - {m['title']}: {len(m['issues'])} issue(s)\n")
+                    f.write(
+                        f"  CRITICAL - {m['title']}: {len(m['issues'])} issue(s)\n")
                 for m in warning:
-                    f.write(f"  WARNING - {m['title']}: {len(m['issues'])} issue(s)\n")
+                    f.write(
+                        f"  WARNING - {m['title']}: {len(m['issues'])} issue(s)\n")
         except Exception:
             pass  # Silent fail for logging
 
@@ -1139,7 +1224,7 @@ def _prompt_episode_mismatches(mismatches, old_data=None):
     if critical:
         print(f"\nCRITICAL ISSUES ({len(critical)})")
         print("───────────────────────────────────────────────────────────────────")
-        
+
         formatted_critical = [_format_mismatch_entry(m) for m in critical]
         paginate_list(
             formatted_critical,
@@ -1151,7 +1236,7 @@ def _prompt_episode_mismatches(mismatches, old_data=None):
     if warning:
         print(f"\nWARNINGS ({len(warning)})")
         print("───────────────────────────────────────────────────────────────────")
-        
+
         formatted_warnings = [_format_mismatch_entry(m) for m in warning]
         paginate_list(
             formatted_warnings,
@@ -1169,12 +1254,14 @@ def _prompt_episode_mismatches(mismatches, old_data=None):
         print(f"2) Delete index & rescrape {len(critical)} critical series")
         print(f"3) Cancel (discard all changes)\n")
         choice = input("Choose option (1-3): ").strip()
-        
+
         if choice == '2':
             # Extract URLs for rescraping
-            rescrape_data = _extract_critical_series_for_rescrape(critical, old_data)
+            rescrape_data = _extract_critical_series_for_rescrape(
+                critical, old_data)
             if rescrape_data['urls']:
-                print(f"\nWill rescrape {len(rescrape_data['urls'])} critical series")
+                print(
+                    f"\nWill rescrape {len(rescrape_data['urls'])} critical series")
                 return False, rescrape_data  # False = don't merge now, rescrape instead
             else:
                 print(f"\nCould not extract URLs for critical series")
@@ -1183,9 +1270,10 @@ def _prompt_episode_mismatches(mismatches, old_data=None):
             return False, None
         # Default or choice '1': proceed
     else:
-        choice = input("\nProceed with merge despite warnings? (y/n): ").strip().lower()
+        choice = input(
+            "\nProceed with merge despite warnings? (y/n): ").strip().lower()
         return choice == 'y', None
-    
+
     return True, None
 
 
@@ -1210,14 +1298,17 @@ def _prompt_change_confirmations(changes, new_dict):
         lines = []
         for (title, season), ep_nums in grouped.items():
             series = new_dict.get(title)
-            total_in_season, watched_in_season = _get_season_stats(series, season)
+            total_in_season, watched_in_season = _get_season_stats(
+                series, season)
             sub = '✓' if series and series.get('subscribed') else '✗'
             wl = '✓' if series and series.get('watchlist') else '✗'
             sub_wl = f" (Sub:{sub} WL:{wl})"
             if total_in_season > 0:
-                lines.append(f"  {prefix} {title} [{season}]: {watched_in_season}/{total_in_season} episodes{sub_wl}")
+                lines.append(
+                    f"  {prefix} {title} [{season}]: {watched_in_season}/{total_in_season} episodes{sub_wl}")
             else:
-                lines.append(f"  {prefix} {title} [{season}]: {len(ep_nums)} episode(s){sub_wl}")
+                lines.append(
+                    f"  {prefix} {title} [{season}]: {len(ep_nums)} episode(s){sub_wl}")
         return lines
 
     def _show_and_confirm(header, items, formatter, prompt_text):
@@ -1231,7 +1322,8 @@ def _prompt_change_confirmations(changes, new_dict):
         return resp == 'y'
 
     if changes['newly_watched']:
-        lines = _build_episode_lines(changes['newly_watched'], new_dict, prefix='[+]')
+        lines = _build_episode_lines(
+            changes['newly_watched'], new_dict, prefix='[+]')
         if _show_and_confirm(
             f"[OK] {len(changes['newly_watched'])} episode(s) would change from UNWATCHED to WATCHED",
             lines, lambda x: x,
@@ -1242,7 +1334,8 @@ def _prompt_change_confirmations(changes, new_dict):
             print("  -> Watched changes will be ignored (episodes stay unwatched)")
 
     if changes['newly_unwatched']:
-        lines = _build_episode_lines(changes['newly_unwatched'], new_dict, prefix='[!]')
+        lines = _build_episode_lines(
+            changes['newly_unwatched'], new_dict, prefix='[!]')
         if _show_and_confirm(
             f"[WARN] {len(changes['newly_unwatched'])} episode(s) would change from WATCHED to UNWATCHED",
             lines, lambda x: x,
@@ -1263,7 +1356,8 @@ def _prompt_change_confirmations(changes, new_dict):
         print("\n" + "-"*70)
         print(formatted_changes)
         print("-"*70)
-        resp = input("\nAllow subscription/watchlist changes? (y/n): ").strip().lower()
+        resp = input(
+            "\nAllow subscription/watchlist changes? (y/n): ").strip().lower()
         if resp == 'y':
             if changes.get('newly_subscribed'):
                 allowed['subscribe'] = True
@@ -1309,11 +1403,13 @@ def _build_merged_data(old_data, new_dict, allowed):
     for title, new_entry in new_dict.items():
         if title in merged:
             old_entry = merged[title]
-            old_seasons = {s.get('season'): s for s in old_entry.get('seasons', [])}
+            old_seasons = {
+                s.get('season'): s for s in old_entry.get('seasons', [])}
             for new_season in new_entry.get('seasons', []):
                 season_label = new_season.get('season')
                 if season_label in old_seasons:
-                    old_eps = {str(ep.get('number')): ep for ep in old_seasons[season_label].get('episodes', [])}
+                    old_eps = {str(ep.get('number')): ep for ep in old_seasons[season_label].get(
+                        'episodes', [])}
                     merged_episodes = []
                     for new_ep in new_season.get('episodes', []):
                         ep_num = str(new_ep.get('number'))
@@ -1338,7 +1434,8 @@ def _build_merged_data(old_data, new_dict, allowed):
                     if new_season.get('ignored_episode_0'):
                         old_seasons[season_label]['ignored_episode_0'] = True
                     else:
-                        old_seasons[season_label].pop('ignored_episode_0', None)
+                        old_seasons[season_label].pop(
+                            'ignored_episode_0', None)
                 else:
                     validated_eps = []
                     for ep in new_season.get('episodes', []):
@@ -1356,21 +1453,25 @@ def _build_merged_data(old_data, new_dict, allowed):
             total_eps, watched_eps = get_episode_counts(old_entry)
             old_entry['watched_episodes'] = watched_eps
             old_entry['total_episodes'] = total_eps
-            old_entry['unwatched_episodes'] = old_entry['total_episodes'] - old_entry['watched_episodes']
+            old_entry['unwatched_episodes'] = old_entry['total_episodes'] - \
+                old_entry['watched_episodes']
             new_url = new_entry.get('url', '')
             new_link = new_entry.get('link', '')
             if new_url and _is_valid_series_url(new_url):
                 old_entry['url'] = new_url
             elif new_url:
-                logger.warning("Rejected invalid URL during merge for '%s': %s", title, new_url[:80])
+                logger.warning(
+                    "Rejected invalid URL during merge for '%s': %s", title, new_url[:80])
             if new_link and _is_valid_series_url(new_link):
                 old_entry['link'] = new_link
             elif new_link:
-                logger.warning("Rejected invalid link during merge for '%s': %s", title, new_link[:80])
+                logger.warning(
+                    "Rejected invalid link during merge for '%s': %s", title, new_link[:80])
             if 'subscribed' in new_entry:
                 new_sub = new_entry['subscribed']
                 if new_sub is None:
-                    logger.error("Ignoring None subscribed for existing entry '%s' — keeping old value", title)
+                    logger.error(
+                        "Ignoring None subscribed for existing entry '%s' — keeping old value", title)
                 else:
                     old_sub = old_entry.get('subscribed', False)
                     if old_sub != new_sub:
@@ -1381,7 +1482,8 @@ def _build_merged_data(old_data, new_dict, allowed):
             if 'watchlist' in new_entry:
                 new_wl = new_entry['watchlist']
                 if new_wl is None:
-                    logger.error("Ignoring None watchlist for existing entry '%s' — keeping old value", title)
+                    logger.error(
+                        "Ignoring None watchlist for existing entry '%s' — keeping old value", title)
                 else:
                     old_wl = old_entry.get('watchlist', False)
                     if old_wl != new_wl:
@@ -1400,9 +1502,30 @@ def _build_merged_data(old_data, new_dict, allowed):
             old_entry['last_updated'] = datetime.now().isoformat()
             old_entry.setdefault('subscribed', False)
             old_entry.setdefault('watchlist', False)
+            if new_entry.get('fallback_url'):
+                old_entry['fallback_url'] = new_entry['fallback_url']
+            if new_entry.get('recent_url'):
+                old_entry['recent_url'] = new_entry['recent_url']
+            # Preserve/update per-series scrape timing with exponential moving average.
+            new_scrape_seconds = new_entry.get('scrape_duration_seconds')
+            if isinstance(new_scrape_seconds, (int, float)) and new_scrape_seconds > 0:
+                old_avg = old_entry.get('avg_scrape_seconds')
+                if isinstance(old_avg, (int, float)) and old_avg > 0:
+                    alpha = 0.3  # 30% new sample, 70% history
+                    old_entry['avg_scrape_seconds'] = (
+                        alpha * float(new_scrape_seconds)
+                        + (1 - alpha) * float(old_avg)
+                    )
+                    # Also preserve the actual scrape duration from this scrape
+                    old_entry['scrape_duration_seconds'] = new_scrape_seconds
+                else:
+                    old_entry['avg_scrape_seconds'] = float(new_scrape_seconds)
+                    old_entry['scrape_duration_seconds'] = new_scrape_seconds
             merged[title] = {
                 'url': old_entry.get('url', ''),
                 'link': old_entry.get('link', ''),
+                'fallback_url': old_entry.get('fallback_url', ''),
+                'recent_url': old_entry.get('recent_url', ''),
                 'subscribed': old_entry.get('subscribed', False),
                 'watchlist': old_entry.get('watchlist', False),
                 'title': old_entry.get('title', title),
@@ -1416,27 +1539,41 @@ def _build_merged_data(old_data, new_dict, allowed):
                 'added_date': old_entry.get('added_date', ''),
                 'last_updated': old_entry.get('last_updated', ''),
                 'seasons': old_entry.get('seasons', []),
+                'avg_scrape_seconds': old_entry.get('avg_scrape_seconds'),
+                'scrape_duration_seconds': old_entry.get('scrape_duration_seconds'),
             }
         else:
             if 'subscribed' not in new_entry:
-                logger.warning("New entry '%s' missing 'subscribed' field — setting to False", title)
+                logger.warning(
+                    "New entry '%s' missing 'subscribed' field — setting to False", title)
                 new_entry['subscribed'] = False
             elif new_entry['subscribed'] is None:
-                logger.error("Rejecting new entry '%s': subscribed is None (scrape failed)", title)
+                logger.error(
+                    "Rejecting new entry '%s': subscribed is None (scrape failed)", title)
                 continue
             if 'watchlist' not in new_entry:
-                logger.warning("New entry '%s' missing 'watchlist' field — setting to False", title)
+                logger.warning(
+                    "New entry '%s' missing 'watchlist' field — setting to False", title)
                 new_entry['watchlist'] = False
             elif new_entry['watchlist'] is None:
-                logger.error("Rejecting new entry '%s': watchlist is None (scrape failed)", title)
+                logger.error(
+                    "Rejecting new entry '%s': watchlist is None (scrape failed)", title)
                 continue
             new_entry.setdefault('alt_titles', [])
             new_entry['added_date'] = datetime.now().isoformat()
             new_entry['last_updated'] = datetime.now().isoformat()
             total_eps, watched_eps = get_episode_counts(new_entry)
+            new_scrape_seconds = new_entry.get('scrape_duration_seconds')
+            avg_scrape_seconds = (
+                float(new_scrape_seconds)
+                if isinstance(new_scrape_seconds, (int, float)) and new_scrape_seconds > 0
+                else None
+            )
             merged[title] = {
                 'url': new_entry.get('url', ''),
                 'link': new_entry.get('link', ''),
+                'fallback_url': new_entry.get('fallback_url', ''),
+                'recent_url': new_entry.get('recent_url', ''),
                 'subscribed': new_entry['subscribed'],
                 'watchlist': new_entry['watchlist'],
                 'title': new_entry.get('title', title),
@@ -1450,6 +1587,8 @@ def _build_merged_data(old_data, new_dict, allowed):
                 'added_date': new_entry.get('added_date', ''),
                 'last_updated': new_entry.get('last_updated', ''),
                 'seasons': new_entry.get('seasons', []),
+                'avg_scrape_seconds': avg_scrape_seconds,
+                'scrape_duration_seconds': new_entry.get('scrape_duration_seconds'),
             }
 
     return merged
@@ -1505,6 +1644,33 @@ def remove_series_from_index(index_file, titles_to_remove):
             removed, list(removal_set)[:10],
         )
     return removed
+
+
+def _save_mismatch_report(vanished_entries, index_file):
+    """Save mismatched/vanished entries to a JSON file for later review.
+
+    Writes to data/mismatch_report.json alongside the index file.
+    """
+    if not index_file or not vanished_entries:
+        return
+    try:
+        report_path = os.path.join(os.path.dirname(
+            index_file), 'mismatch_report.json')
+        report = {
+            'generated': datetime.now().isoformat(),
+            'count': len(vanished_entries),
+            'entries': [
+                {'title': title, 'reason': reason, 'url': url}
+                for title, reason, url in vanished_entries
+            ],
+        }
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        print(f"  📄 Mismatch report saved: {report_path}")
+        logger.info("Mismatch report saved with %d entries to %s",
+                    len(vanished_entries), report_path)
+    except Exception as exc:
+        logger.warning("Failed to save mismatch report: %s", exc)
 
 
 def _prompt_vanished_deletions(vanished_entries):
@@ -1566,7 +1732,8 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_fil
         if slug is None:
             slug = _extract_slug_from_field(entry.get('url', ''))
             if slug is not None:
-                logger.warning("Used URL fallback for slug extraction: %s", title)
+                logger.warning(
+                    "Used URL fallback for slug extraction: %s", title)
             else:
                 corrupt_entries.append(title)
                 continue
@@ -1588,29 +1755,36 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_fil
                 vanished.append((title, 'was subscribed', url))
         elif scrape_scope == 'both':
             if is_sub and is_wl:
-                vanished.append((title, 'was subscribed + on watchlist — possibly deleted from s.to', url))
+                vanished.append(
+                    (title, 'was subscribed + on watchlist — possibly deleted from s.to', url))
             elif is_sub:
                 vanished.append((title, 'was subscribed', url))
             elif is_wl:
                 vanished.append((title, 'was on watchlist', url))
 
     if corrupt_entries:
-        print(f"\n⚠ {len(corrupt_entries)} index entry(s) have corrupt/missing URL data:")
+        print(
+            f"\n⚠ {len(corrupt_entries)} index entry(s) have corrupt/missing URL data:")
         for t in corrupt_entries[:10]:
             print(f"  • {t}")
         if len(corrupt_entries) > 10:
             print(f"  ... and {len(corrupt_entries) - 10} more")
         print("  These entries were skipped during vanished-series detection.")
-        logger.warning("Corrupt URL data in %d index entries: %s", len(corrupt_entries), corrupt_entries[:5])
+        logger.warning("Corrupt URL data in %d index entries: %s",
+                       len(corrupt_entries), corrupt_entries[:5])
 
     if vanished:
         separator = '─' * 70
         print(f"\n{separator}")
-        print(f"  [INFO] {len(vanished)} previously indexed series NOT found in current scrape:")
+        print(
+            f"  [INFO] {len(vanished)} previously indexed series NOT found in current scrape:")
         print(separator)
         for i, (title, reason, url) in enumerate(vanished, 1):
             print(f"  {i}. {title}  ({reason})  [{url}]")
         print(separator)
+
+        # Save mismatched entries to JSON for later review
+        _save_mismatch_report(vanished, index_file)
 
         # Only offer deletion for full catalog scopes
         if scrape_scope in ('all', 'new_only'):
@@ -1618,10 +1792,12 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_fil
             if new_data is not None:
                 old_titles = set(old_data.keys())
                 if isinstance(new_data, list):
-                    new_dict = {s.get('title'): s for s in new_data if s.get('title')}
+                    new_dict = {
+                        s.get('title'): s for s in new_data if s.get('title')}
                 else:
                     new_dict = dict(new_data)
-                incoming_new = [t for t in new_dict if t and t not in old_titles]
+                incoming_new = [
+                    t for t in new_dict if t and t not in old_titles]
                 if incoming_new:
                     print(f"\n{separator}")
                     print(
@@ -1646,7 +1822,8 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_fil
                 removed = remove_series_from_index(index_file, to_delete)
                 print(f"  ✓ Removed {removed} series from index.")
             elif to_delete:
-                print(f"  ⚠ {len(to_delete)} series marked for deletion but no index_file provided.")
+                print(
+                    f"  ⚠ {len(to_delete)} series marked for deletion but no index_file provided.")
             else:
                 print("  ✓ No series removed — all vanished entries preserved.")
 
@@ -1670,7 +1847,7 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_fil
 
 def confirm_and_save_changes(new_data, description, index_manager):
     """Show changes, ask for separate watched/unwatched confirmation, merge, and save.
-    
+
     Returns:
         True: Changes saved
         False: Merge cancelled or no changes
@@ -1684,7 +1861,8 @@ def confirm_and_save_changes(new_data, description, index_manager):
         new_dict = dict(new_data)
 
     changes = detect_changes(old_data, new_dict)
-    logger.info("Detected changes: %s", {k: len(v) for k, v in changes.items()})
+    logger.info("Detected changes: %s", {k: len(v)
+                for k, v in changes.items()})
 
     allowed = _prompt_change_confirmations(changes, new_dict)
 
@@ -1708,7 +1886,8 @@ def confirm_and_save_changes(new_data, description, index_manager):
     # Check for episode count mismatches before merging
     mismatches = _detect_episode_count_mismatches(old_data, new_dict)
     if mismatches:
-        proceed, rescrape_data = _prompt_episode_mismatches(mismatches, old_data)
+        proceed, rescrape_data = _prompt_episode_mismatches(
+            mismatches, old_data)
         if rescrape_data:
             # Return rescrape data so main.py can handle deletion + rescraping
             return {'rescrape': True, 'urls': rescrape_data['urls'], 'titles': rescrape_data['titles']}
@@ -1738,7 +1917,7 @@ def confirm_and_save_changes(new_data, description, index_manager):
         has_housekeeping = housekeeping['added'] or housekeeping['removed']
         if has_housekeeping:
             total = sum(len(v) for v in housekeeping['added'].values()) + \
-                    sum(len(v) for v in housekeeping['removed'].values())
+                sum(len(v) for v in housekeeping['removed'].values())
             print(f"\n⚠ {total} ignored episode 0 change(s):")
             print(f"{'─'*70}")
             if housekeeping['added']:
@@ -1756,7 +1935,8 @@ def confirm_and_save_changes(new_data, description, index_manager):
                     if wl is not None:
                         parts.append(f"WL:{'✓' if wl else '✗'}")
                     sub_info = f" ({' '.join(parts)})" if parts else ""
-                    print(f"    • {title}  [{seasons}]: {watched}/{total_ep} watched{sub_info}")
+                    print(
+                        f"    • {title}  [{seasons}]: {watched}/{total_ep} watched{sub_info}")
             if housekeeping['removed']:
                 print("  Unmark ignored (ep0 no longer present):")
                 for title in sorted(housekeeping['removed']):
@@ -1772,7 +1952,8 @@ def confirm_and_save_changes(new_data, description, index_manager):
                     if wl is not None:
                         parts.append(f"WL:{'✓' if wl else '✗'}")
                     sub_info = f" ({' '.join(parts)})" if parts else ""
-                    print(f"    • {title}  [{seasons}]: {watched}/{total_ep} watched{sub_info}")
+                    print(
+                        f"    • {title}  [{seasons}]: {watched}/{total_ep} watched{sub_info}")
             print(f"{'─'*70}")
             if input("Apply these changes? (y/n): ").strip().lower() != 'y':
                 print("✗ Changes discarded.")

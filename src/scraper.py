@@ -18,20 +18,92 @@ from bs4 import BeautifulSoup
 
 from config.config import (  # pylint: disable=import-error,no-name-in-module
     EMAIL, PASSWORD, DATA_DIR, SERIES_INDEX_FILE, NUM_WORKERS,
-    HTTP_REQUEST_TIMEOUT,
+    HTTP_REQUEST_TIMEOUT, SITE_URL, SITE_URLS,
 )
 
 logger = logging.getLogger(__name__)
 
 # ── Constants ───────────────────────────────────────────────────────────────
-SITE_URL = "https://s.to"
-LOGIN_URL = f"{SITE_URL}/login"
-SERIES_LIST_URL = f"{SITE_URL}/serien"
-ACCOUNT_SUBSCRIBED_URL = f"{SITE_URL}/account/subscribed"
-ACCOUNT_WATCHLIST_URL = f"{SITE_URL}/account/watchlist"
+PRIMARY_SITE_URL = SITE_URL
+FALLBACK_SITE_URLS = SITE_URLS[1:]
+LOGIN_PATH = "/login"
+SERIES_LIST_PATH = "/serien"
+ACCOUNT_SUBSCRIBED_PATH = "/account/subscribed"
+ACCOUNT_WATCHLIST_PATH = "/account/watchlist"
 CHECKPOINT_EVERY = 10
 REQUEST_TIMEOUT = HTTP_REQUEST_TIMEOUT
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
+
+
+def _build_full_url(base_url, path):
+    if not path:
+        return base_url
+    path = path.split('?')[0].split('#')[0]
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    if path.startswith("serie/"):
+        path = "/" + path
+    if not path.startswith("/"):
+        path = "/" + path
+    return base_url.rstrip("/") + path
+
+
+def _extract_season_links(html: str, series_slug: str, base_url: str) -> list[tuple[str, str]]:
+    """Extract season numbers and URLs from the #season-nav element.
+
+    Uses data-season-pill attributes first, then falls back to href patterns.
+    Handles season 0 (Filme/OVAs/Specials) correctly.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Primary: data-season-pill attributes from #season-nav
+    seasons = []
+    seen = set()
+    for link in soup.select("#season-nav a[data-season-pill]"):
+        season_num = link.get("data-season-pill", "")
+        if season_num is not None and season_num != "" and season_num not in seen:
+            seen.add(season_num)
+            url = f"{base_url}/serie/{series_slug}/staffel-{season_num}"
+            seasons.append((season_num, url))
+
+    if seasons:
+        return seasons
+
+    # Fallback: href pattern /serie/{slug}/staffel-{num}
+    staffel_pattern = re.compile(
+        rf'/serie/{re.escape(series_slug)}/staffel-(\d+)', re.IGNORECASE
+    )
+    for a_tag in soup.find_all("a", href=True):
+        m = staffel_pattern.search(a_tag["href"])
+        if m and m.group(1) not in seen:
+            seen.add(m.group(1))
+            url = f"{base_url}/serie/{series_slug}/staffel-{m.group(1)}"
+            seasons.append((m.group(1), url))
+
+    if seasons:
+        return seasons
+
+    # bs.to-style fallback: #seasons a
+    links = []
+    for a in soup.select("#seasons a"):
+        label = a.get_text(strip=True)
+        href = a.get("href", "")
+        if not label or not href:
+            continue
+        href = href.split("?")[0].split("#")[0]
+        if href.startswith("http"):
+            url = href
+        elif href.startswith("serie/"):
+            url = f"{base_url}/{href}"
+        else:
+            url = f"{base_url}/serie/{series_slug}/{href}" if not href.startswith(
+                "/") else f"{base_url}{href}"
+        key = (label, url)
+        if key not in seen:
+            seen.add(key)
+            links.append((label, url))
+    return links
+
 
 _SERIE_PATH_RE = re.compile(r'(/serie/[^/]+)')
 _SERIE_SLUG_RE = re.compile(r'^/serie/([^/?#]+)/?$')
@@ -96,13 +168,15 @@ def _parse_episodes(html: str) -> list[dict]:
             if cols:
                 ep_num = cols[0].get_text(strip=True)
         if not ep_num:
-            logger.warning("Could not determine episode number for row %d", idx)
+            logger.warning(
+                "Could not determine episode number for row %d", idx)
             return None
 
         try:
             ep_num_int = int(ep_num)
         except ValueError:
-            logger.warning("Non-numeric episode number '%s' in row %d", ep_num, idx)
+            logger.warning(
+                "Non-numeric episode number '%s' in row %d", ep_num, idx)
             return None
 
         # Extract titles (German and English)
@@ -117,7 +191,8 @@ def _parse_episodes(html: str) -> list[dict]:
             cols = row.find_all("td")
             if len(cols) >= 2:
                 title_tag = cols[1].find("strong")
-                title = title_tag.get_text(strip=True) if title_tag else cols[1].get_text(strip=True)
+                title = title_tag.get_text(
+                    strip=True) if title_tag else cols[1].get_text(strip=True)
 
         # Check if watched — s.to uses 'seen' class, bs.to uses 'watched' class
         row_classes = row.get("class") or []
@@ -132,62 +207,6 @@ def _parse_episodes(html: str) -> list[dict]:
             ep["title"] = title
         episodes.append(ep)
     return episodes
-
-
-def _extract_season_links(html: str, series_slug: str) -> list[tuple[str, str]]:
-    """Extract season numbers and URLs from the #season-nav element.
-
-    Uses data-season-pill attributes first, then falls back to href patterns.
-    Handles season 0 (Filme/OVAs/Specials) correctly.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Primary: data-season-pill attributes from #season-nav
-    seasons = []
-    seen = set()
-    for link in soup.select("#season-nav a[data-season-pill]"):
-        season_num = link.get("data-season-pill", "")
-        if season_num is not None and season_num != "" and season_num not in seen:
-            seen.add(season_num)
-            url = f"{SITE_URL}/serie/{series_slug}/staffel-{season_num}"
-            seasons.append((season_num, url))
-
-    if seasons:
-        return seasons
-
-    # Fallback: href pattern /serie/{slug}/staffel-{num}
-    staffel_pattern = re.compile(
-        rf'/serie/{re.escape(series_slug)}/staffel-(\d+)', re.IGNORECASE
-    )
-    for a_tag in soup.find_all("a", href=True):
-        m = staffel_pattern.search(a_tag["href"])
-        if m and m.group(1) not in seen:
-            seen.add(m.group(1))
-            url = f"{SITE_URL}/serie/{series_slug}/staffel-{m.group(1)}"
-            seasons.append((m.group(1), url))
-
-    if seasons:
-        return seasons
-
-    # bs.to-style fallback: #seasons a
-    links = []
-    for a in soup.select("#seasons a"):
-        label = a.get_text(strip=True)
-        href = a.get("href", "")
-        if not label or not href:
-            continue
-        href = href.split("?")[0].split("#")[0]
-        if href.startswith("http"):
-            url = href
-        elif href.startswith("serie/"):
-            url = f"{SITE_URL}/{href}"
-        else:
-            url = f"{SITE_URL}/serie/{series_slug}/{href}" if not href.startswith("/") else f"{SITE_URL}{href}"
-        key = (label, url)
-        if key not in seen:
-            seen.add(key)
-            links.append((label, url))
-    return links
 
 
 def _check_error_page(html: str) -> str | None:
@@ -260,7 +279,8 @@ def _detect_subscription_status(html: str) -> tuple[bool | None, bool | None]:
         return (None, None)
 
     # Prefer desktop-only container to avoid duplicate mobile buttons
-    buttons = soup.select(".d-none.d-md-flex .js-action-btn") or soup.select(".js-action-btn")
+    buttons = soup.select(
+        ".d-none.d-md-flex .js-action-btn") or soup.select(".js-action-btn")
     if not buttons:
         return (None, None)
 
@@ -320,10 +340,12 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         self.completed_links: set[str] = set()
         self.failed_links: list[dict] = []
 
-        self.checkpoint_file = os.path.join(DATA_DIR, '.scrape_checkpoint.json')
+        self.checkpoint_file = os.path.join(
+            DATA_DIR, '.scrape_checkpoint.json')
         self.failed_file = os.path.join(DATA_DIR, '.failed_series.json')
         self.ignore_file = os.path.join(DATA_DIR, '.ignored_series.json')
-        self.ignored_seasons_file = os.path.join(DATA_DIR, '.ignored_seasons.json')
+        self.ignored_seasons_file = os.path.join(
+            DATA_DIR, '.ignored_seasons.json')
         self.pause_file = os.path.join(DATA_DIR, '.pause_scraping')
 
         self._checkpoint_mode: str | None = None
@@ -334,6 +356,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         self.paused = False
         self._ignored_seasons_cache: set[tuple[str, str]] | None = None
         self._stale_ignored_warnings: list[dict] = []
+        self.site_url = PRIMARY_SITE_URL
 
     # ── Static / class methods ──────────────────────────────────────────────
 
@@ -522,10 +545,12 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                     )
                     if has_seasons:
                         now_available += 1
-                        print(f"  ⚠ {title}: now available! Consider removing from .ignored_series.json")
+                        print(
+                            f"  ⚠ {title}: now available! Consider removing from .ignored_series.json")
                     else:
                         still_empty += 1
-                        print(f"  ✓ {title}: still empty (no seasons — ignored)")
+                        print(
+                            f"  ✓ {title}: still empty (no seasons — ignored)")
             except httpx.HTTPError as e:
                 still_empty += 1
                 print(f"  ✓ {title}: still unreachable ({e} — ignored)")
@@ -565,7 +590,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             for t in disappeared:
                 print(f"  ✕ {t}")
         if in_catalog:
-            print(f"ℹ {len(in_catalog)} ignored series still listed in catalog (skipped)")
+            print(
+                f"ℹ {len(in_catalog)} ignored series still listed in catalog (skipped)")
         print()
 
     def _check_index_vs_catalog(self, all_series: list[dict]):
@@ -603,12 +629,14 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         ]
 
         if vanished:
-            print(f"\n⚠ {len(vanished)} indexed series no longer in catalog — may have been removed from the site:")
+            print(
+                f"\n⚠ {len(vanished)} indexed series no longer in catalog — may have been removed from the site:")
             for slug, title in vanished[:20]:
                 print(f"  ✕ {title}  ({slug})")
             if len(vanished) > 20:
                 print(f"  ... and {len(vanished) - 20} more")
-            print("  → Review series_index.json and decide whether to keep or remove these entries.")
+            print(
+                "  → Review series_index.json and decide whether to keep or remove these entries.")
             print()
 
     # ── Ignored seasons management ──────────────────────────────────────────
@@ -663,7 +691,10 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         url = url.split('?')[0].split('#')[0]
         m = _SERIE_PATH_RE.search(url)
         if m:
-            return f"{SITE_URL}{m.group(1)}"
+            if url.startswith('http://') or url.startswith('https://'):
+                parsed = urlparse(url)
+                return f"{parsed.scheme}://{parsed.netloc}{m.group(1)}"
+            return _build_full_url(SITE_URL, m.group(1))
         return url
 
     # ── Pause detection ─────────────────────────────────────────────────────
@@ -682,6 +713,138 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 os.remove(self.pause_file)
         except OSError:
             pass
+
+    async def _try_login_on_site(self, site_url) -> httpx.AsyncClient:
+        client = httpx.AsyncClient(
+            headers={"User-Agent": UA},
+            timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=2,
+                                max_keepalive_connections=1),
+        )
+        login_url = _build_full_url(site_url, LOGIN_PATH)
+        try:
+            resp = await client.get(login_url)
+        except httpx.HTTPError as e:
+            await client.aclose()
+            raise RuntimeError(f"Login page fetch failed: {e}")
+
+        if resp.status_code >= 500:
+            await client.aclose()
+            raise RuntimeError(
+                f"Login page returned status {resp.status_code}")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        token = ""
+        for name in ("_token", "security_token"):
+            token_input = soup.find("input", {"name": name})
+            if token_input and token_input.get("value"):
+                token = token_input["value"]
+                break
+
+        login_data = {
+            "email": EMAIL,
+            "password": PASSWORD,
+        }
+        if token:
+            login_data["_token"] = token
+
+        try:
+            login_resp = await client.post(login_url, data=login_data, follow_redirects=True)
+        except httpx.HTTPError as e:
+            await client.aclose()
+            raise RuntimeError(f"Login submission failed: {e}")
+
+        if login_resp.status_code >= 500:
+            await client.aclose()
+            raise RuntimeError(
+                f"Login submission returned status {login_resp.status_code}")
+
+        if "logout" not in login_resp.text.lower():
+            await client.aclose()
+            raise RuntimeError("Login failed — check credentials")
+
+        return client
+
+    async def probe_sites(self, site_urls: list[str] | None = None) -> list[dict]:
+        """Probe multiple site URLs and report whether each responds as expected."""
+        urls = site_urls or [PRIMARY_SITE_URL] + FALLBACK_SITE_URLS
+        results = []
+        for site_url in urls:
+            try:
+                client = httpx.AsyncClient(
+                    headers={"User-Agent": UA},
+                    timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
+                    follow_redirects=True,
+                    limits=httpx.Limits(max_connections=2,
+                                        max_keepalive_connections=1),
+                )
+                async with client as session:
+                    resp = await session.get(_build_full_url(site_url, LOGIN_PATH))
+                ok = resp.status_code < 500 and "login" in resp.text.lower()
+                results.append({
+                    "site_url": site_url,
+                    "ok": ok,
+                    "status_code": resp.status_code,
+                    "reason": "reachable" if ok else "unexpected response",
+                })
+            except Exception as exc:
+                results.append({
+                    "site_url": site_url,
+                    "ok": False,
+                    "status_code": None,
+                    "reason": str(exc),
+                })
+        return results
+
+    async def get_series_count_for_site(self, site_url: str) -> int:
+        """Fetch the series catalogue for a site and return the number of entries."""
+        previous_site_url = self.site_url
+        try:
+            self.site_url = site_url
+            client = await self._create_logged_in_client()
+            try:
+                series = await self._get_all_series(client)
+            finally:
+                await client.aclose()
+            return len(series)
+        finally:
+            self.site_url = previous_site_url
+
+    async def get_series_slugs_for_site(self, site_url: str) -> set[str]:
+        """Fetch the series catalogue for a site and return a set of slugs."""
+        previous_site_url = self.site_url
+        try:
+            self.site_url = site_url
+            client = await self._create_logged_in_client()
+            try:
+                series = await self._get_all_series(client)
+            finally:
+                await client.aclose()
+            slugs = set()
+            for s in series:
+                slug = self.get_series_slug_from_url(s.get('link', ''))
+                if slug and slug != 'unknown':
+                    slugs.add(slug)
+            return slugs
+        finally:
+            self.site_url = previous_site_url
+
+    async def _create_logged_in_client(self) -> httpx.AsyncClient:
+        """Create a logged-in HTTP client for the currently selected site.
+
+        This implementation uses the single active host selected at startup
+        and does not perform fallback during scraping operations.
+        """
+        # Always use the currently selected site (selected at startup)
+        # No fallback during scraping operations as per requirements
+        try:
+            return await self._try_login_on_site(self.site_url)
+        except RuntimeError as exc:
+            # Log the error but don't fallback during scraping
+            logger.error("Login failed for site %s: %s", self.site_url, exc)
+            raise
 
     # ── Index helpers (for new_only mode) ───────────────────────────────────
 
@@ -703,44 +866,9 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     # ── Async internals ─────────────────────────────────────────────────────
 
-    async def _create_logged_in_client(self) -> httpx.AsyncClient:
-        client = httpx.AsyncClient(
-            headers={"User-Agent": UA},
-            timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
-            follow_redirects=True,
-            limits=httpx.Limits(max_connections=2, max_keepalive_connections=1),
-        )
-        # Get login page to retrieve CSRF token
-        resp = await client.get(LOGIN_URL)
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        # s.to uses a hidden _token field (Laravel CSRF) or security_token
-        token = ""
-        for name in ("_token", "security_token"):
-            token_input = soup.find("input", {"name": name})
-            if token_input and token_input.get("value"):
-                token = token_input["value"]
-                break
-
-        # s.to login uses email + password
-        login_data = {
-            "email": EMAIL,
-            "password": PASSWORD,
-        }
-        if token:
-            login_data["_token"] = token
-
-        login_resp = await client.post(LOGIN_URL, data=login_data, follow_redirects=True)
-
-        if "logout" not in login_resp.text.lower():
-            await client.aclose()
-            raise RuntimeError("Login failed — check credentials")
-
-        return client
-
     async def _get_all_series(self, client: httpx.AsyncClient) -> list[dict]:
-        """Fetch the full series catalogue from s.to/serien."""
-        resp = await client.get(SERIES_LIST_URL)
+        """Fetch the full series catalogue from the active site."""
+        resp = await client.get(_build_full_url(self.site_url, SERIES_LIST_PATH))
         if not _is_logged_in(resp.text):
             raise RuntimeError("Not logged in — cannot fetch series catalogue")
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -768,13 +896,17 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             entry = {
                 "title": title,
                 "link": f"/serie/{slug}",
-                "url": f"{SITE_URL}/serie/{slug}",
+                "url": _build_full_url(SITE_URL, f"/serie/{slug}"),
             }
             parent_li = a.find_parent("li", class_="series-item")
             if parent_li:
-                alt = _extract_alt_titles(parent_li.get("data-search", ""), title)
+                alt = _extract_alt_titles(
+                    parent_li.get("data-search", ""), title)
                 if alt:
                     entry["alt_titles"] = alt
+            if self.site_url != SITE_URL:
+                entry["scrape_url"] = _build_full_url(
+                    self.site_url, f"/serie/{slug}")
             series.append(entry)
         return series
 
@@ -790,13 +922,14 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         """
         pages = []
         if source in ('subscribed', 'both'):
-            pages.append((ACCOUNT_SUBSCRIBED_URL, 'Subscriptions'))
+            pages.append(
+                (_build_full_url(self.site_url, ACCOUNT_SUBSCRIBED_PATH), 'Subscriptions'))
         if source in ('watchlist', 'both'):
-            pages.append((ACCOUNT_WATCHLIST_URL, 'Watchlist'))
+            pages.append(
+                (_build_full_url(self.site_url, ACCOUNT_WATCHLIST_PATH), 'Watchlist'))
 
         seen_slugs = set()
         series_list = []
-        count_before = 0
 
         for base_url, label in pages:
             count_before = len(series_list)
@@ -810,7 +943,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                     break
 
                 if not _is_logged_in(resp.text):
-                    raise RuntimeError(f"Not logged in — cannot fetch {label} page")
+                    raise RuntimeError(
+                        f"Not logged in — cannot fetch {label} page")
 
                 soup = BeautifulSoup(resp.text, "html.parser")
                 page_found = 0
@@ -824,11 +958,15 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                         continue
                     seen_slugs.add(slug)
                     title = link.get_text(strip=True) or slug
-                    series_list.append({
+                    item = {
                         "title": title,
                         "link": f"/serie/{slug}",
-                        "url": f"{SITE_URL}/serie/{slug}",
-                    })
+                        "url": _build_full_url(SITE_URL, f"/serie/{slug}"),
+                    }
+                    if self.site_url != SITE_URL:
+                        item["scrape_url"] = _build_full_url(
+                            self.site_url, f"/serie/{slug}")
+                    series_list.append(item)
                     page_found += 1
 
                 # Check for pagination
@@ -851,8 +989,9 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     async def _scrape_one_series(self, client: httpx.AsyncClient, info: dict) -> dict:
         """Scrape a single series: all seasons, episodes, subscription status."""
-        url = info["url"]
-        slug = self.get_series_slug_from_url(url)
+        t_start = time.perf_counter()
+        url = info.get("scrape_url", info["url"])
+        slug = self.get_series_slug_from_url(info["url"])
 
         try:
             resp = await client.get(url, follow_redirects=True)
@@ -882,7 +1021,14 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         # Detect subscription/watchlist status from the main series page
         subscribed, watchlist = _detect_subscription_status(html)
 
-        season_links = _extract_season_links(html, slug)
+        scrape_url = info.get("scrape_url", info["url"])
+        if scrape_url.startswith("http://") or scrape_url.startswith("https://"):
+            parsed_scrape = urlparse(scrape_url)
+            season_base_url = f"{parsed_scrape.scheme}://{parsed_scrape.netloc}"
+        else:
+            season_base_url = self.site_url
+
+        season_links = _extract_season_links(html, slug, season_base_url)
         if not season_links:
             return self._error_result(info, "no seasons found")
 
@@ -915,19 +1061,24 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 stale_ignored.append({
                     "slug": slug,
                     "season": label,
-                    "url": f"{SITE_URL}/serie/{slug}",
+                    "url": _build_full_url(self.site_url, f"/serie/{slug}"),
                     "title": title,
                 })
 
             watched_count = sum(1 for ep in episodes if ep["watched"])
             total_count = len(episodes)
+            primary_season_url = _build_full_url(
+                SITE_URL, f"/serie/{slug}/staffel-{label}")
             season_entry = {
                 "season": label,
-                "url": season_url,
+                "url": primary_season_url,
                 "episodes": episodes,
                 "watched_episodes": watched_count,
                 "total_episodes": total_count,
+                "recent_url": season_url,
             }
+            if season_url != primary_season_url:
+                season_entry["fallback_url"] = season_url
             if ep0_exists and is_ignored:
                 season_entry["ignored_episode_0"] = True
             seasons_data.append(season_entry)
@@ -946,12 +1097,16 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             "watchlist": watchlist,
             "seasons": seasons_data,
         }
+        result["recent_url"] = scrape_url
+        if scrape_url != info["url"]:
+            result["fallback_url"] = scrape_url
         if info.get("alt_titles"):
             result["alt_titles"] = info["alt_titles"]
         if has_episode_zero:
             result["_has_episode_zero"] = True
         if stale_ignored:
             result["_stale_ignored_seasons"] = stale_ignored
+        result["scrape_duration_seconds"] = time.perf_counter() - t_start
         return result
 
     @staticmethod
@@ -972,7 +1127,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
     # ── Worker ──────────────────────────────────────────────────────────────
 
     async def _worker(self, worker_id: int, queue: asyncio.Queue,
-                      results: list, progress: dict, total: int):
+                      results: list, progress: dict, total: int,
+                      predicted_rate: float | None = None):
         try:
             client = await self._create_logged_in_client()
         except RuntimeError:
@@ -999,7 +1155,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 if result["title"].startswith("[ERROR"):
                     # Extract actual error reason from "[ERROR: reason]"
                     raw = result["title"]
-                    reason = raw[8:-1] if raw.startswith("[ERROR: ") and raw.endswith("]") else "scrape_error"
+                    reason = raw[8:-1] if raw.startswith(
+                        "[ERROR: ") and raw.endswith("]") else "scrape_error"
                     self.failed_links.append({
                         "url": info["url"],
                         "title": info.get("title", ""),
@@ -1040,9 +1197,21 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 progress["done"] += 1
                 done = progress["done"]
 
-                # Progress bar + ETA
+                # Progress bar + ETA using per-series historical timings
                 elapsed = time.perf_counter() - progress["start"]
-                rate = done / elapsed if elapsed > 0 else 0
+                current_rate = done / elapsed if elapsed > 0 else 0
+
+                if predicted_rate is not None and predicted_rate > 0:
+                    # Historical predicted rate dominates (95%+ initially),
+                    # current session rate gains weight very slowly.
+                    # Series are always the same, so last run's avg_scrape_seconds
+                    # is the best predictor for next scrape time.
+                    current_weight = min(0.05, 0.01 + (done / total) * 0.04)
+                    rate = current_rate * current_weight + \
+                        predicted_rate * (1 - current_weight)
+                else:
+                    rate = current_rate
+
                 eta = (total - done) / rate if rate > 0 else 0
                 eta_mins = f"{eta / 60:.1f}"
                 pct = int((done / total) * 100)
@@ -1050,18 +1219,22 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 filled = int(bar_len * done / total)
                 progress_bar = '█' * filled + '░' * (bar_len - filled)
 
-                season_labels = [s.get('season', '?') for s in result.get('seasons', [])]
+                season_labels = [s.get('season', '?')
+                                 for s in result.get('seasons', [])]
                 season_info = f" [{','.join(season_labels)}]" if season_labels else ""
 
                 # Subscription status indicators
                 sub_parts = []
                 if result.get("subscribed") is not None:
-                    sub_parts.append(f"Sub:{'✓' if result['subscribed'] else '✗'}")
+                    sub_parts.append(
+                        f"Sub:{'✓' if result['subscribed'] else '✗'}")
                 if result.get("watchlist") is not None:
-                    sub_parts.append(f"WL:{'✓' if result['watchlist'] else '✗'}")
+                    sub_parts.append(
+                        f"WL:{'✓' if result['watchlist'] else '✗'}")
                 sub_info = f" ({' '.join(sub_parts)})" if sub_parts else ""
 
-                ep0_warn = " ⚠ episode 0 detected" if result.get("_has_episode_zero") else ""
+                ep0_warn = " ⚠ episode 0 detected" if result.get(
+                    "_has_episode_zero") else ""
 
                 if result["title"].startswith("[ERROR"):
                     print(
@@ -1093,13 +1266,69 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         if not self.completed_links:
             return series_list
         before = len(series_list)
-        filtered = [s for s in series_list if s.get('link') not in self.completed_links]
+        filtered = [s for s in series_list if s.get(
+            'link') not in self.completed_links]
         if before != len(filtered):
-            print(f"  Skipping {before - len(filtered)} already-completed series")
+            print(
+                f"  Skipping {before - len(filtered)} already-completed series")
         if not filtered:
             print("✓ All series already scraped (from checkpoint)")
             return None
         return filtered
+
+    def _compute_predicted_eta(self, series_list: list[dict]) -> float | None:
+        """Sum per-series avg_scrape_seconds from the index for ETA prediction."""
+        try:
+            if not os.path.exists(SERIES_INDEX_FILE):
+                return None
+            with open(SERIES_INDEX_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            items = data if isinstance(data, list) else list(data.values())
+            slug_map: dict[str, float] = {}
+            for item in items:
+                url = item.get('url', '') or item.get('link', '')
+                slug = self.get_series_slug_from_url(url)
+                avg = item.get('avg_scrape_seconds')
+                if slug != 'unknown' and isinstance(avg, (int, float)) and avg > 0:
+                    slug_map[slug] = float(avg)
+
+            total = 0.0
+            matched = 0
+            for s in series_list:
+                slug = self.get_series_slug_from_url(s.get('link', ''))
+                if slug in slug_map:
+                    total += slug_map[slug]
+                    matched += 1
+
+            if matched >= max(3, len(series_list) * 0.1):
+                return total
+            return None
+        except Exception:
+            return None
+
+    def _get_average_scrape_seconds(self) -> float | None:
+        """Compute the average avg_scrape_seconds across all indexed series.
+
+        Used as a fallback estimate when per-series slug matching fails
+        (e.g. first scrape with no historical data for specific series).
+        """
+        try:
+            if not os.path.exists(SERIES_INDEX_FILE):
+                return None
+            with open(SERIES_INDEX_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            items = data if isinstance(data, list) else list(data.values())
+            values = [
+                float(item['avg_scrape_seconds'])
+                for item in items
+                if isinstance(item.get('avg_scrape_seconds'), (int, float))
+                and item['avg_scrape_seconds'] > 0
+            ]
+            if len(values) >= 3:
+                return sum(values) / len(values)
+            return None
+        except Exception:
+            return None
 
     async def _scrape_list(self, series_list: list[dict], num_workers: int | None = None):
         """Scrape a list of series using multi-session workers."""
@@ -1115,11 +1344,32 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         n = min(num_workers or NUM_WORKERS, len(filtered))
         progress = {"done": 0, "start": time.perf_counter()}
 
-        print(f"→ Scraping {len(filtered)} series with {n} session(s)...")
+        # Pre-compute predicted ETA from per-series historical timings
+        predicted_seconds = self._compute_predicted_eta(filtered)
+        if predicted_seconds:
+            # Divide by workers: _compute_predicted_eta returns sequential total,
+            # but we scrape in parallel so wall-clock time is roughly total / workers.
+            predicted_seconds = predicted_seconds / n
+            predicted_rate = len(filtered) / predicted_seconds
+            print(f"→ Scraping {len(filtered)} series with {n} session(s)"
+                  f" (predicted ~{predicted_seconds / 60:.1f}m)...")
+        else:
+            # Fallback: use average of existing per-series timings from the index
+            avg_seconds = self._get_average_scrape_seconds()
+            if avg_seconds:
+                estimated_seconds_per_series = avg_seconds
+            else:
+                estimated_seconds_per_series = 1.0
+            predicted_seconds = len(filtered) * \
+                estimated_seconds_per_series / n
+            predicted_rate = len(filtered) / predicted_seconds
+            print(f"→ Scraping {len(filtered)} series with {n} session(s)"
+                  f" (estimated ~{predicted_seconds / 60:.1f}m)...")
 
         tasks = [
             asyncio.create_task(
-                self._worker(i, queue, results, progress, len(filtered))
+                self._worker(i, queue, results, progress, len(filtered),
+                             predicted_rate=predicted_rate)
             )
             for i in range(n)
         ]
@@ -1154,16 +1404,20 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 " — consider removing from .ignored_seasons.json:"
             )
             for w in self._stale_ignored_warnings:
-                url = w.get('url', f"{SITE_URL}/serie/{w['slug']}")
+                url = w.get('url', _build_full_url(
+                    self.site_url, f"/serie/{w['slug']}"))
                 print(f"  • {w['title']} (season {w['season']}) → {url}")
 
         if has_new_ep0:
-            new_ep0 = [f for f in self.failed_links if f.get("reason") == "episode_0_placeholder"]
-            print(f"\n⚠ New episode 0 detected in {len(new_ep0)} series (added to .failed_series.json):")
+            new_ep0 = [f for f in self.failed_links if f.get(
+                "reason") == "episode_0_placeholder"]
+            print(
+                f"\n⚠ New episode 0 detected in {len(new_ep0)} series (added to .failed_series.json):")
             for f in new_ep0:
                 print(f"  • {f.get('title', '?')} → {f.get('url', '?')}")
 
-        answer = input("\nContinue scraping remaining series? (y/n): ").strip().lower()
+        answer = input(
+            "\nContinue scraping remaining series? (y/n): ").strip().lower()
         if answer != 'y':
             print("✗ Scraping stopped. Saving progress...")
             self.save_checkpoint(include_data=True)
@@ -1197,8 +1451,22 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             main_url = self.normalize_to_series_url(single_url)
             m = _SERIE_PATH_RE.search(main_url)
             link = m.group(1) if m else main_url
-            info = {"title": main_url.split("/")[-1], "link": link, "url": main_url}
-            print(f"→ Scraping single series: {main_url}")
+            canonical_url = _build_full_url(SITE_URL, link)
+            if main_url.startswith('http://') or main_url.startswith('https://'):
+                parsed_main = urlparse(main_url)
+                if parsed_main.netloc != urlparse(SITE_URL).netloc:
+                    scrape_url = main_url
+                else:
+                    scrape_url = _build_full_url(self.site_url, link)
+            else:
+                scrape_url = _build_full_url(self.site_url, link)
+            info = {
+                "title": main_url.split("/")[-1],
+                "link": link,
+                "url": canonical_url,
+                "scrape_url": scrape_url,
+            }
+            print(f"→ Scraping single series: {canonical_url}")
             result = await self._scrape_one_series(tmp, info)
             await tmp.aclose()
             if result["title"].startswith("[ERROR"):
@@ -1216,11 +1484,27 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 main_url = self.normalize_to_series_url(u)
                 m = _SERIE_PATH_RE.search(main_url)
                 link = m.group(1) if m else main_url
-                series_list.append({"title": main_url.split("/")[-1], "link": link, "url": main_url})
+                canonical_url = _build_full_url(SITE_URL, link)
+                if main_url.startswith('http://') or main_url.startswith('https://'):
+                    parsed_main = urlparse(main_url)
+                    if parsed_main.netloc != urlparse(SITE_URL).netloc:
+                        scrape_url = main_url
+                    else:
+                        scrape_url = _build_full_url(self.site_url, link)
+                else:
+                    scrape_url = _build_full_url(self.site_url, link)
+                series_list.append({
+                    "title": main_url.split("/")[-1],
+                    "link": link,
+                    "url": canonical_url,
+                    "scrape_url": scrape_url,
+                })
             await tmp.aclose()
-            n = NUM_WORKERS if self._use_parallel and len(series_list) > 1 else 1
+            n = NUM_WORKERS if self._use_parallel and len(
+                series_list) > 1 else 1
             await self._scrape_list(series_list, num_workers=n)
-            print(f"  Successfully scraped: {len(self.series_data)}/{len(url_list)} series")
+            print(
+                f"  Successfully scraped: {len(self.series_data)}/{len(url_list)} series")
             return
 
         if retry_failed:
@@ -1230,7 +1514,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             if not failed_list:
                 print("✓ No failed series found")
                 return
-            print(f"✓ Found {len(failed_list)} failed series — retrying in sequential mode")
+            print(
+                f"✓ Found {len(failed_list)} failed series — retrying in sequential mode")
             await self._scrape_list(failed_list, num_workers=1)
             return
 
@@ -1257,7 +1542,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 print()
 
             # Two-phase scraping: ignored-season series first
-            ignored_slugs_set = {slug for slug, _ in self._get_ignored_seasons()}
+            ignored_slugs_set = {slug for slug,
+                                 _ in self._get_ignored_seasons()}
             ignored_batch = [
                 s for s in account_series
                 if self.get_series_slug_from_url(
@@ -1270,7 +1556,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             ]
 
             if ignored_batch:
-                print(f"→ Phase 1: Scraping {len(ignored_batch)} series with ignored seasons...")
+                print(
+                    f"→ Phase 1: Scraping {len(ignored_batch)} series with ignored seasons...")
                 await self._scrape_list(ignored_batch, num_workers=1)
                 if not self._ignored_seasons_continue():
                     return
@@ -1294,7 +1581,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             new_list = [s for s in all_series
                         if self.get_series_slug_from_url(s.get('link', '')) not in existing_slugs
                         and self.get_series_slug_from_url(s.get('link', '')) not in ignored_slugs]
-            print(f"→ New series to scrape: {len(new_list)} (out of {len(all_series)})")
+            print(
+                f"→ New series to scrape: {len(new_list)} (out of {len(all_series)})")
             if not new_list:
                 print("✓ No new series detected — nothing to scrape")
                 return
@@ -1350,7 +1638,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         ]
 
         if ignored_batch:
-            print(f"→ Phase 1: Scraping {len(ignored_batch)} series with ignored seasons...")
+            print(
+                f"→ Phase 1: Scraping {len(ignored_batch)} series with ignored seasons...")
             await self._scrape_list(ignored_batch, num_workers=1)
             if not self._ignored_seasons_continue():
                 return
@@ -1367,7 +1656,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         """Main entry point: login, scrape, save checkpoint."""
         if parallel is not None:
             self._use_parallel = parallel
-            print(f"→ Using {'multi-session' if parallel else 'single-session'} mode")
+            print(
+                f"→ Using {'multi-session' if parallel else 'single-session'} mode")
         else:
             self._use_parallel = True
 
@@ -1380,7 +1670,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         try:
             if resume_only:
                 if self.load_checkpoint():
-                    print(f"→ Resuming from checkpoint ({len(self.completed_links)} series already done)")
+                    print(
+                        f"→ Resuming from checkpoint ({len(self.completed_links)} series already done)")
                 else:
                     print("⚠ No checkpoint found. Starting fresh...")
 

@@ -6,6 +6,7 @@ Uses **httpx** (no browser needed) with a multi-session architecture for fast, p
 ## Features
 
 - **Multi-session parallel scraping** — 10 concurrent httpx sessions by default (configurable)
+- **Smart per-series ETA estimation** — each series stores its own `avg_scrape_seconds` (exponential moving average for ETA prediction) and `scrape_duration_seconds` (actual duration of the most recent scrape) in the index. ETA is predicted by summing those per-series averages for the remaining work, then blended with the live session rate (historical 85%→45% as progress increases). Because the database is stable, per-series history is the best predictor.
 - **Checkpoint & resume** — automatically saves progress every 10 series; resume after interruptions (Ctrl+C safe)
 - **Subscription & watchlist tracking** — scrape series from your s.to account subscriptions/watchlist and track status per series
 - **New series detection** — detects newly added series on your account and lists them before scraping
@@ -21,6 +22,7 @@ Uses **httpx** (no browser needed) with a multi-session architecture for fast, p
 - **Failed series retry** — automatically tracks failures for later bulk retry
 - **Pause/resume** — create a `.pause_scraping` file to gracefully pause workers
 - **Report generation** — full or filtered (subscribed/watchlist) statistics with export
+- **Data integrity checks** — detects episode count drops, season removals, watched-status corruption, and title changes before merging; offers to delete & rescrape critical series
 - **Atomic file writes** — all JSON writes use temp file + replace to prevent corruption
 - **File locking** — prevents concurrent access corruption
 - **Disk space check** — warns before scraping if free space is below 100 MB
@@ -146,6 +148,7 @@ When ignored-season series are found in a scrape, they are processed first (two-
 │   ├── .ignored_seasons.json   # Episode 0 ignore list
 │   ├── .ignored_series.json    # Series to skip during scraping
 │   ├── .scrape_checkpoint.json # Resume checkpoint (auto-managed)
+
 │   ├── .failed_series.json     # Failed series list (auto-managed)
 │   └── .pause_scraping         # Pause flag file (auto-managed)
 ├── src/
