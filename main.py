@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from config.config import (  # noqa: E402  # pylint: disable=import-error,no-name-in-module,wrong-import-position
     EMAIL, PASSWORD, DATA_DIR, SERIES_INDEX_FILE, LOG_FILE, SITE_URL, SITE_URLS,
+    DEFAULT_BATCH_FILE,
 )
 from src.scraper import SToScraper  # noqa: E402  # pylint: disable=wrong-import-position
 from src.index_manager import (  # noqa: E402  # pylint: disable=wrong-import-position
@@ -373,14 +374,7 @@ def _cross_check_index(scraper, site_url, count, idx_mgr=None):
 
     site_slugs = _fetch_site_slugs_for_host(scraper, site_url)
     if site_slugs is None:
-        print(
-            f"    Index count: {idx_count}  →  match = False ({diff:+d} difference)")
-        print("    ⚠ Cannot compare slugs because site slug list is unavailable.")
         return None
-
-    sign = '+' if diff > 0 else ''
-    print(
-        f"    Index count: {idx_count}  →  match = False ({sign}{diff} difference)")
 
     index_slugs, index_duplicates, index_entries_without_slug = _collect_index_slugs(
         idx_mgr)
@@ -394,21 +388,16 @@ def _cross_check_index(scraper, site_url, count, idx_mgr=None):
             report_path, count, idx_count, index_slugs, site_slugs,
             only_in_index, only_on_site, index_duplicates,
             index_entries_without_slug)
+        print(f"    → Mismatch report created: {report_path}")
     else:
         if os.path.exists(report_path):
             os.remove(report_path)
-        print(
-            "    ℹ Index has fewer series than site — expected if not all series were scraped yet. No mismatch report created.")
         logger.info(
             "Index count %d is below site count %d; no mismatch report generated",
             idx_count, count)
 
     if index_duplicates:
         _remove_duplicate_index_entries(idx_mgr, index_duplicates)
-
-    if not only_in_index and not only_on_site and not index_duplicates:
-        print(
-            "    ⚠ Counts differ but slug sets match and no duplicates — possible slug normalization mismatch.")
 
     return False
 
@@ -714,14 +703,14 @@ def scrape_unwatched():
 
 
 def single_or_batch_add():
-    default_file = os.path.join(os.path.dirname(__file__), 'series_urls.txt')
+    default_file = DEFAULT_BATCH_FILE
     print("\n→ Add single link / batch from file")
     print("  • Paste URL → scrapes single series")
     print("  • Enter filename → uses that file for batch")
-    print("  • Press Enter → uses default (series_urls.txt)")
+    print(f"  • Press Enter → uses default ({default_file})")
     print("  • Type 0   → back to main menu\n")
 
-    user_input = input("Enter [default: series_urls.txt]: ").strip()
+    user_input = input(f"Enter [default: {default_file}]: ").strip()
 
     if user_input == '0':
         return
@@ -842,13 +831,12 @@ def _show_ongoing_and_export(report, index_manager):
                     urls.append(url)
 
             if urls:
-                urls_file = os.path.join(
-                    os.path.dirname(__file__), 'series_urls.txt')
+                urls_file = DEFAULT_BATCH_FILE
                 with open(urls_file, 'w', encoding='utf-8') as f:
                     f.write('\n'.join(urls) + '\n')
-                print(f"\n✓ Exported {len(urls)} URLs to series_urls.txt")
+                print(f"\n✓ Exported {len(urls)} URLs to {urls_file}")
                 print("  → Use option 5 (Batch add from file) to rescrape these series")
-                logger.info("Exported %d URLs to series_urls.txt", len(urls))
+                logger.info("Exported %d URLs to %s", len(urls), urls_file)
             else:
                 print("\n⚠ Could not extract URLs from ongoing series")
         except Exception as e:
