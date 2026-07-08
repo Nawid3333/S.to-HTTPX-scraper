@@ -194,7 +194,7 @@ def show_menu():  # pylint: disable=too-many-branches
     print("  5. Single link / batch add")
     print("  6. Scrape subscribed/watchlist series")
     print("  7. Retry failed scrapes")
-    print("  8. Pause scraping")
+    print("  8. Pause current scraping (in another terminal)")
     print("  9. Exit\n")
 
 
