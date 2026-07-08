@@ -136,6 +136,8 @@ The file `data/.ignored_seasons.json` lists known seasons with this issue:
 ]
 ```
 
+Only the `slug` and `season` fields are used for matching; `url`/`link` are optional and informational. Slugs are normalized to lowercase internally, so `Spider-Noir` and `spider-noir` match the same series.
+
 **Three-way behavior during scraping:**
 
 | Scenario                                            | Behavior                                                                      |
