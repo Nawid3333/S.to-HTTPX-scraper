@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 
 from config.config import (  # pylint: disable=import-error,no-name-in-module
     EMAIL, PASSWORD, DATA_DIR, SERIES_INDEX_FILE, NUM_WORKERS,
-    HTTP_REQUEST_TIMEOUT, SITE_URL, SITE_URLS,
+    HTTP_REQUEST_TIMEOUT, SITE_URL, SITE_URLS, CHECKPOINT_EVERY,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,6 @@ LOGIN_PATH = "/login"
 SERIES_LIST_PATH = "/serien"
 ACCOUNT_SUBSCRIBED_PATH = "/account/subscribed"
 ACCOUNT_WATCHLIST_PATH = "/account/watchlist"
-CHECKPOINT_EVERY = 10
 REQUEST_TIMEOUT = HTTP_REQUEST_TIMEOUT
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
@@ -375,7 +374,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     # ── Checkpoint management ───────────────────────────────────────────────
 
-    def save_checkpoint(self, include_data=False):
+    def _sync_save_checkpoint(self, include_data=False):
+        """Synchronous checkpoint writer; thread-safe."""
         with self._lock:
             payload = {
                 'completed_links': list(self.completed_links),
@@ -391,6 +391,14 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 os.replace(tmp, self.checkpoint_file)
             except Exception as e:
                 logger.error("Failed to save checkpoint: %s", e)
+
+    def save_checkpoint(self, include_data=False):
+        """Synchronous entry point for final/pause/error paths."""
+        self._sync_save_checkpoint(include_data=include_data)
+
+    async def asave_checkpoint(self, include_data=False):
+        """Offload checkpoint I/O to a thread so the event loop stays free."""
+        await asyncio.to_thread(self._sync_save_checkpoint, include_data)
 
     def load_checkpoint(self) -> bool:
         with self._lock:
@@ -662,8 +670,16 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             logger.error("Failed to save ignored seasons: %s", e)
 
     def get_ignored_seasons_set(self) -> set[tuple[str, str]]:
-        """Return set of (slug, season) tuples that have episode 0 ignored."""
-        return {(e.get('slug', ''), str(e.get('season', ''))) for e in self.load_ignored_seasons()} - {('', '')}
+        """Return set of (slug, season) tuples that have episode 0 ignored.
+
+        Slugs are normalized to lowercase so mixed-case entries in
+        .ignored_seasons.json still match the lowercase slugs derived
+        from canonical s.to URLs.
+        """
+        return {
+            (str(e.get('slug', '')).lower(), str(e.get('season', '')))
+            for e in self.load_ignored_seasons()
+        } - {('', '')}
 
     def _get_ignored_seasons(self) -> set[tuple[str, str]]:
         """Cached version — loads from file once per run."""
@@ -680,7 +696,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             if 'serie' in parts:
                 idx = parts.index('serie')
                 if idx + 1 < len(parts) and parts[idx + 1]:
-                    return parts[idx + 1]
+                    return parts[idx + 1].lower()
             return 'unknown'
         except Exception:
             return 'unknown'
@@ -1252,8 +1268,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                     )
 
                 if done % CHECKPOINT_EVERY == 0:
-                    self.series_data = list(results)
-                    self.save_checkpoint(include_data=True)
+                    await self.asave_checkpoint(include_data=False)
         finally:
             await client.aclose()
 
@@ -1463,11 +1478,12 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 self.series_data = []
             else:
                 self.series_data = [result]
+            # Single-series runs have no partial resume state to preserve.
+            self.clear_checkpoint()
             return
 
         if url_list:
-            if self._checkpoint_mode is None:
-                self._checkpoint_mode = 'batch'
+            self._checkpoint_mode = self._checkpoint_mode or 'batch'
             series_list = []
             for u in url_list:
                 main_url = self.normalize_to_series_url(u)

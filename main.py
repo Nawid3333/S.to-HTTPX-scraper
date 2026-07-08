@@ -75,6 +75,7 @@ _MODE_LABELS = {
     'all_series': 'Scrape all series (option 1)',
     'new_only': 'Scrape NEW series only (option 2)',
     'unwatched': 'Scrape unwatched series (option 3)',
+    'single': 'Add single series by URL (option 5)',
     'batch': 'Batch add (option 5)',
     'subscribed': 'Subscribed series (option 6)',
     'watchlist': 'Watchlist series (option 6)',
@@ -243,23 +244,29 @@ def _host_label(site_url):
 def _format_host_rows(hosts):
     """Return a list of table-formatted host status lines.
 
-    hosts is a list of (label, status, count, idx_match) tuples.
+    hosts is a list of (label, status, count, idx_count, compare_txt) tuples.
     """
     if not hosts:
         return []
 
     host_w = max(len(label) for label, *_ in hosts)
+    idx_counts = [str(idx_count) for _, _, _, idx_count,
+                  *_ in hosts if idx_count is not None]
+    idx_w = max([len(c) for c in idx_counts] + [5])
+    cmp_txts = [str(compare_txt) for _, _, _, _,
+                compare_txt in hosts if compare_txt is not None]
+    cmp_w = max([len(c) for c in cmp_txts] + [7])
     lines = [
-        f"  {'Host':<{host_w}}  Status    Series      Index",
-        f"  {'-' * host_w}  ------    ------      -----",
+        f"  {'Host':<{host_w}}  Status    Series      {'Index':<{idx_w}}  {'Compare':<{cmp_w}}",
+        f"  {'-' * host_w}  ------    ------      {'-' * idx_w}  {'-' * cmp_w}",
     ]
-    for label, status, count, idx_match in hosts:
+    for label, status, count, idx_count, compare_txt in hosts:
         status_txt = "OK" if status else "FAILED"
         count_txt = f"{count:,}" if count is not None else "-"
-        match_txt = "match" if idx_match is True else (
-            "mismatch" if idx_match is False else "-")
+        idx_txt = f"{idx_count:,}" if idx_count is not None else "-"
+        cmp_txt = compare_txt if compare_txt is not None else "-"
         lines.append(
-            f"  {label:<{host_w}}  {status_txt:<8}  {count_txt:<10}  {match_txt}"
+            f"  {label:<{host_w}}  {status_txt:<8}  {count_txt:<10}  {idx_txt:<{idx_w}}  {cmp_txt}"
         )
     return lines
 
@@ -360,21 +367,27 @@ def _cross_check_index(scraper, site_url, count, idx_mgr=None):
     """Compare site slugs against the local index and report mismatches.
 
     idx_mgr can be passed in to avoid reloading the index repeatedly.
+
+    Returns a tuple (idx_count, compare_txt) to display in the host table,
+    or (None, None) when the index is empty or data is unavailable.
     """
     if idx_mgr is None:
         idx_mgr = IndexManager(SERIES_INDEX_FILE)
     idx_count = len(idx_mgr.series_index)
     if idx_count == 0:
-        return None
+        return None, None
 
-    match = count == idx_count
-    diff = count - idx_count
-    if match:
-        return True
+    diff = idx_count - count
+    if diff == 0:
+        return idx_count, "match"
+
+    sign = '+' if diff > 0 else ''
 
     site_slugs = _fetch_site_slugs_for_host(scraper, site_url)
     if site_slugs is None:
-        return None
+        logger.warning(
+            "Cannot compare slugs because site slug list is unavailable.")
+        return idx_count, f"mismatch ({sign}{diff})"
 
     index_slugs, index_duplicates, index_entries_without_slug = _collect_index_slugs(
         idx_mgr)
@@ -388,18 +401,18 @@ def _cross_check_index(scraper, site_url, count, idx_mgr=None):
             report_path, count, idx_count, index_slugs, site_slugs,
             only_in_index, only_on_site, index_duplicates,
             index_entries_without_slug)
-        print(f"    → Mismatch report created: {report_path}")
+        logger.info("Mismatch report created: %s", report_path)
     else:
         if os.path.exists(report_path):
             os.remove(report_path)
-        logger.info(
+        logger.debug(
             "Index count %d is below site count %d; no mismatch report generated",
             idx_count, count)
 
     if index_duplicates:
         _remove_duplicate_index_entries(idx_mgr, index_duplicates)
 
-    return False
+    return idx_count, f"mismatch ({sign}{diff})"
 
 
 def _probe_sites_before_scrape(scraper, idx_mgr=None):
@@ -429,7 +442,8 @@ def _probe_sites_before_scrape(scraper, idx_mgr=None):
         label = _host_label(site_url)
         ok = bool(entry.get("ok"))
         count = None
-        idx_match = None
+        idx_count = None
+        compare_txt = None
 
         if ok:
             ok_hosts.append(site_url)
@@ -437,10 +451,10 @@ def _probe_sites_before_scrape(scraper, idx_mgr=None):
             count = len(site_slugs) if site_slugs is not None else None
             host_counts[site_url] = count
             if count is not None:
-                idx_match = _cross_check_index(
+                idx_count, compare_txt = _cross_check_index(
                     scraper, site_url, count, idx_mgr=idx_mgr)
 
-        table_rows.append((label, ok, count, idx_match))
+        table_rows.append((label, ok, count, idx_count, compare_txt))
 
     for line in _format_host_rows(table_rows):
         print(line)

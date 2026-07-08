@@ -102,6 +102,10 @@ LOG_FILE = os.path.join(LOGS_DIR, "s_to_backup.log")
 # Scraping configuration (edit here, not in .env)
 NUM_WORKERS = 10  # Number of parallel httpx sessions
 
+# Checkpoint frequency: serialize resume state every N completed series.
+# Large index (≈58 MB) → less frequent to avoid event-loop blocking.
+CHECKPOINT_EVERY = int(os.getenv("STO_CHECKPOINT_EVERY", "50"))
+
 # Timeouts (edit here, not in .env)
 HTTP_REQUEST_TIMEOUT = 20.0
 
