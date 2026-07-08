@@ -1,5 +1,8 @@
 # S.TO Series Scraper & Index Manager (httpx)
 
+[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./LICENSE)
+
 Scrapes watched TV series from **s.to** and maintains a local JSON index.
 Uses **httpx** (no browser needed) with a multi-session architecture for fast, parallel scraping.
 
