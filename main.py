@@ -69,6 +69,9 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+# Set after host probing in _probe_sites_before_scrape and used by the rescrape path.
+ACTIVE_SITE_URL = SITE_URL
+
 
 _MODE_LABELS = {
     'all_series': 'Scrape all series (option 1)',
@@ -479,6 +482,8 @@ def _probe_sites_before_scrape(scraper):
 
     print()
     scraper.site_url = ok_hosts[0] if ok_hosts else SITE_URL
+    global ACTIVE_SITE_URL
+    ACTIVE_SITE_URL = scraper.site_url
     suffix = "" if ok_hosts else " (default)"
     print(f"→ Active host: {scraper.site_url}{suffix}")
     if scraper.site_url.startswith("http://"):
@@ -539,7 +544,8 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
                 index_manager.load_index()
 
             result = confirm_and_save_changes(
-                scraper.series_data, description, index_manager)
+                scraper.series_data, description, index_manager,
+                active_site_url=ACTIVE_SITE_URL)
             if isinstance(result, dict) and result.get('rescrape'):
                 # User already confirmed deletion in the integrity dialog — proceed directly
                 n = len(result['urls'])
@@ -606,7 +612,8 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
         if 'scraper' in locals() and scraper.series_data:
             index_manager = IndexManager(SERIES_INDEX_FILE)
             result = confirm_and_save_changes(
-                scraper.series_data, description, index_manager)
+                scraper.series_data, description, index_manager,
+                active_site_url=ACTIVE_SITE_URL)
             if isinstance(result, dict) and result.get('rescrape'):
                 remove_series_from_index(SERIES_INDEX_FILE, result['titles'])
                 for url, title in zip(result['urls'], result['titles']):

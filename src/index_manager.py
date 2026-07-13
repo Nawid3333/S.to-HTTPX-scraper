@@ -994,7 +994,7 @@ def _detect_episode_count_mismatches(old_data, new_dict):
     return mismatches
 
 
-def _extract_critical_series_for_rescrape(mismatches, old_data):
+def _extract_critical_series_for_rescrape(mismatches, old_data, active_site_url=None):
     """Extract critical series and their URLs for rescraping.
 
     Returns:
@@ -1009,6 +1009,7 @@ def _extract_critical_series_for_rescrape(mismatches, old_data):
     else:
         old_map = dict(old_data) if old_data else {}
 
+    base_url = (active_site_url or SITE_URL).rstrip('/')
     urls = []
     titles = []
     series_data = {}
@@ -1022,7 +1023,7 @@ def _extract_critical_series_for_rescrape(mismatches, old_data):
             url = entry.get('url') or entry.get('link')
             if url:
                 if not url.startswith('http'):
-                    url = f"{SITE_URL}{url}"
+                    url = f"{base_url}{url}"
                 urls.append(url)
                 series_data[title] = entry
 
@@ -1033,7 +1034,7 @@ def _extract_critical_series_for_rescrape(mismatches, old_data):
     }
 
 
-def _prompt_episode_mismatches(mismatches, old_data=None):
+def _prompt_episode_mismatches(mismatches, old_data=None, active_site_url=None):
     """Prompt user for warning/critical issues with option to delete & rescrape critical ones.
 
     Returns:
@@ -1158,7 +1159,7 @@ def _prompt_episode_mismatches(mismatches, old_data=None):
         if choice == '2':
             # Extract URLs for rescraping
             rescrape_data = _extract_critical_series_for_rescrape(
-                critical, old_data)
+                critical, old_data, active_site_url=active_site_url)
             if rescrape_data['urls']:
                 print(
                     f"\nWill rescrape {len(rescrape_data['urls'])} critical series")
@@ -1744,7 +1745,7 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_fil
     return [(title, reason) for title, reason, _ in vanished] if vanished else []
 
 
-def confirm_and_save_changes(new_data, description, index_manager):
+def confirm_and_save_changes(new_data, description, index_manager, active_site_url=None):
     """Show changes, ask for separate watched/unwatched confirmation, merge, and save.
 
     Returns:
@@ -1806,7 +1807,7 @@ def confirm_and_save_changes(new_data, description, index_manager):
     mismatches = _detect_episode_count_mismatches(old_data, new_dict)
     if mismatches:
         proceed, rescrape_data = _prompt_episode_mismatches(
-            mismatches, old_data)
+            mismatches, old_data, active_site_url=active_site_url)
         if rescrape_data:
             # Return rescrape data so main.py can handle deletion + rescraping
             return {'rescrape': True, 'urls': rescrape_data['urls'], 'titles': rescrape_data['titles']}
