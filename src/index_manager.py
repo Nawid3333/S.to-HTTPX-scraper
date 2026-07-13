@@ -10,10 +10,7 @@ import logging
 import os
 import re
 import shutil
-import subprocess
-import sys
 import tempfile
-import time
 from collections import defaultdict
 from datetime import datetime
 from urllib.parse import urlparse
@@ -21,22 +18,6 @@ from urllib.parse import urlparse
 from config.config import SITE_URL, VALID_SERIES_HOSTS
 
 logger = logging.getLogger(__name__)
-
-
-def _is_pid_alive(pid):
-    """Check if a process with the given PID is still running (cross-platform)."""
-    try:
-        if sys.platform == 'win32':
-            result = subprocess.run(
-                ['tasklist', '/FI', f'PID eq {pid}', '/NH'],
-                capture_output=True, check=False, text=True,
-                encoding='utf-8', errors='replace'
-            )
-            return str(pid) in result.stdout
-        os.kill(pid, 0)
-        return True
-    except (OSError, ValueError):
-        return False
 
 
 # Pre-compiled regex for season number extraction
@@ -69,82 +50,6 @@ def _is_valid_series_url(url):
     if VALID_SERIES_HOSTS and parsed.netloc not in VALID_SERIES_HOSTS:
         return False
     return bool(_VALID_SERIES_PATH_RE.match(parsed.path))
-
-
-class FileLock:
-    """Simple file-based lock for preventing concurrent access to critical files.
-
-    Uses a .lock file to indicate exclusive access. Waits for lock with timeout.
-    Works cross-platform (Windows, Linux, Mac).
-    """
-
-    def __init__(self, filepath, timeout=10, poll_interval=0.1):
-        self.filepath = filepath
-        self.lock_file = filepath + '.lock'
-        self.timeout = timeout
-        self.poll_interval = poll_interval
-        self.lock_acquired = False
-
-    def acquire(self):
-        """Acquire lock, waiting up to timeout seconds."""
-        start = time.time()
-        while time.time() - start < self.timeout:
-            try:
-                fd = os.open(self.lock_file, os.O_CREAT |
-                             os.O_EXCL | os.O_WRONLY)
-                os.write(fd, f"{os.getpid()}\n".encode())
-                os.close(fd)
-                self.lock_acquired = True
-                return True
-            except (OSError, FileExistsError):
-                time.sleep(self.poll_interval)
-
-        if self._is_lock_stale():
-            logger.warning(
-                "Removing stale lock on %s (owner process dead)", self.filepath)
-            try:
-                os.remove(self.lock_file)
-            except OSError:
-                pass
-            try:
-                fd = os.open(self.lock_file, os.O_CREAT |
-                             os.O_EXCL | os.O_WRONLY)
-                os.write(fd, f"{os.getpid()}\n".encode())
-                os.close(fd)
-                self.lock_acquired = True
-                return True
-            except (OSError, FileExistsError):
-                pass
-
-        logger.warning("Could not acquire lock on %s after %ss",
-                       self.filepath, self.timeout)
-        return False
-
-    def _is_lock_stale(self):
-        """Check if the lock file was left by a process that is no longer running."""
-        try:
-            with open(self.lock_file, 'r', encoding='utf-8') as f:
-                pid_str = f.read().strip()
-            pid = int(pid_str)
-            return not _is_pid_alive(pid)
-        except (OSError, ValueError):
-            return True
-
-    def release(self):
-        """Release lock by removing lock file."""
-        if self.lock_acquired:
-            try:
-                os.remove(self.lock_file)
-                self.lock_acquired = False
-            except OSError:
-                pass
-
-    def __enter__(self):
-        self.acquire()
-        return self
-
-    def __exit__(self, *args):
-        self.release()
 
 
 def _create_file_backup(filepath):
@@ -558,71 +463,68 @@ def show_changes(changes, include_unwatched=True, include_watched=True,
 
 
 class IndexManager:
-    """Manages persistent series index for s.to with file locking."""
+    """Manages persistent series index for s.to """
 
     def __init__(self, index_file):
         self.index_file = index_file
         self.series_index = {}
-        self.file_lock = FileLock(index_file, timeout=10)
         self.load_index()
 
     def load_index(self):
-        """Load existing series index from file with corruption detection and file locking."""
-        with self.file_lock:
-            if not os.path.exists(self.index_file):
-                logger.info("No existing index found at %s", self.index_file)
-                self.series_index = {}
-                return
-            try:
-                with open(self.index_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        self.series_index = {s.get('title'): s for s in data if s.get(
-                            'title') and isinstance(s, dict)}
-                    elif isinstance(data, dict):
-                        first_item = next(iter(data.values()), None)
-                        if first_item and isinstance(first_item, dict) and first_item.get('title'):
-                            self.series_index = data
-                        else:
-                            self.series_index = {item.get('title'): item for item in data.values()
-                                                 if isinstance(item, dict) and item.get('title')}
+        """Load existing series index from file with corruption detection."""
+        if not os.path.exists(self.index_file):
+            logger.info("No existing index found at %s", self.index_file)
+            self.series_index = {}
+            return
+        try:
+            with open(self.index_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    self.series_index = {s.get('title'): s for s in data if s.get(
+                        'title') and isinstance(s, dict)}
+                elif isinstance(data, dict):
+                    first_item = next(iter(data.values()), None)
+                    if first_item and isinstance(first_item, dict) and first_item.get('title'):
+                        self.series_index = data
                     else:
-                        self.series_index = {}
+                        self.series_index = {item.get('title'): item for item in data.values()
+                                             if isinstance(item, dict) and item.get('title')}
+                else:
+                    self.series_index = {}
 
-                    validated_index = {}
-                    for title, series in self.series_index.items():
-                        if _validate_series_entry(series, title):
-                            validated_index[title] = series
-                    self.series_index = validated_index
-                    if not self.series_index:
-                        logger.warning(
-                            "Loaded index is empty or contains no valid series")
+                validated_index = {}
+                for title, series in self.series_index.items():
+                    if _validate_series_entry(series, title):
+                        validated_index[title] = series
+                self.series_index = validated_index
+                if not self.series_index:
+                    logger.warning(
+                        "Loaded index is empty or contains no valid series")
 
-            except json.JSONDecodeError as e:
-                print(f"[ERROR] Index file corrupted: {e}")
-                logger.error("Index file corrupted: %s", e)
-                self.series_index = {}
-            except OSError as e:
-                print(f"[ERROR] Cannot read index file: {e}")
-                logger.error("Cannot read index file: %s", e)
-                self.series_index = {}
-            except Exception as e:
-                print(f"[WARN] Error loading index: {e}")
-                logger.error("Error loading index: %s", e)
-                self.series_index = {}
+        except json.JSONDecodeError as e:
+            print(f"[ERROR] Index file corrupted: {e}")
+            logger.error("Index file corrupted: %s", e)
+            self.series_index = {}
+        except OSError as e:
+            print(f"[ERROR] Cannot read index file: {e}")
+            logger.error("Cannot read index file: %s", e)
+            self.series_index = {}
+        except Exception as e:
+            print(f"[WARN] Error loading index: {e}")
+            logger.error("Error loading index: %s", e)
+            self.series_index = {}
 
     def save_index(self):
-        """Save series index to file atomically with file locking."""
-        with self.file_lock:
-            try:
-                series_list = list(self.series_index.values())
-                _atomic_write_json(self.index_file, series_list)
-                logger.info("Saved index with %d series",
-                            len(self.series_index))
-            except Exception as e:
-                print(f"[ERROR] Failed to save index: {e}")
-                logger.error("Error saving index: %s", e)
-                raise
+        """Save series index to file atomically."""
+        try:
+            series_list = list(self.series_index.values())
+            _atomic_write_json(self.index_file, series_list)
+            logger.info("Saved index with %d series",
+                        len(self.series_index))
+        except Exception as e:
+            print(f"[ERROR] Failed to save index: {e}")
+            logger.error("Error saving index: %s", e)
+            raise
 
     def get_series_with_progress(self, sort_by='completion', reverse=False):
         """Get series with computed episode progress information."""
@@ -1606,9 +1508,8 @@ def _extract_slug_from_field(value):
 def remove_series_from_index(index_file, titles_to_remove):
     """Remove series entries from the index file by title.
 
-    Loads the index, filters out entries whose title is in the
-    removal set, and atomically writes back.
-    Returns the number of entries actually removed.
+    Loads the index, filters out entries whose title is in the removal set,
+    and atomically writes back. Returns the number of entries actually removed.
     """
     if not titles_to_remove or not os.path.exists(index_file):
         return 0
@@ -1616,32 +1517,32 @@ def remove_series_from_index(index_file, titles_to_remove):
     try:
         with open(index_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
+
+        if isinstance(data, list):
+            filtered = [
+                entry for entry in data
+                if entry.get('title') not in removal_set
+            ]
+            removed = len(data) - len(filtered)
+        elif isinstance(data, dict):
+            filtered_dict = {
+                k: v for k, v in data.items()
+                if k not in removal_set
+            }
+            removed = len(data) - len(filtered_dict)
+            filtered = list(filtered_dict.values())
+        else:
+            return 0
+
+        if removed > 0:
+            _atomic_write_json(index_file, filtered)
+            logger.info(
+                "Removed %d vanished series from index: %s",
+                removed, list(removal_set)[:10],
+            )
+        return removed
     except (json.JSONDecodeError, OSError):
         return 0
-
-    if isinstance(data, list):
-        filtered = [
-            entry for entry in data
-            if entry.get('title') not in removal_set
-        ]
-        removed = len(data) - len(filtered)
-    elif isinstance(data, dict):
-        filtered_dict = {
-            k: v for k, v in data.items()
-            if k not in removal_set
-        }
-        removed = len(data) - len(filtered_dict)
-        filtered = list(filtered_dict.values())
-    else:
-        return 0
-
-    if removed > 0:
-        _atomic_write_json(index_file, filtered)
-        logger.info(
-            "Removed %d vanished series from index: %s",
-            removed, list(removal_set)[:10],
-        )
-    return removed
 
 
 def _save_mismatch_report(vanished_entries, index_file):

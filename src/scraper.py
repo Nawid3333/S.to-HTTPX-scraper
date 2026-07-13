@@ -356,6 +356,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         self._ignored_seasons_cache: set[tuple[str, str]] | None = None
         self._stale_ignored_warnings: list[dict] = []
         self.site_url = PRIMARY_SITE_URL
+        self._interrupt_requested = False
 
     # ── Static / class methods ──────────────────────────────────────────────
 
@@ -507,15 +508,6 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             pass
         return []
 
-    def save_ignored_series(self, ignored: list[dict]):
-        tmp = self.ignore_file + '.tmp'
-        try:
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(ignored, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, self.ignore_file)
-        except Exception as e:
-            logger.error("Failed to save ignored series: %s", e)
-
     def get_ignored_slugs(self) -> set[str]:
         return {self.get_series_slug_from_url(s.get('url', '')) for s in self.load_ignored_series()} - {'unknown'}
 
@@ -660,15 +652,6 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             pass
         return []
 
-    def save_ignored_seasons(self, ignored: list[dict]):
-        tmp = self.ignored_seasons_file + '.tmp'
-        try:
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(ignored, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, self.ignored_seasons_file)
-        except Exception as e:
-            logger.error("Failed to save ignored seasons: %s", e)
-
     def get_ignored_seasons_set(self) -> set[tuple[str, str]]:
         """Return set of (slug, season) tuples that have episode 0 ignored.
 
@@ -719,6 +702,11 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         self._last_pause_check = now
         self._pause_cached = os.path.exists(self.pause_file)
         return self._pause_cached
+
+    def _check_interrupt_flag(self):
+        """Raise KeyboardInterrupt if a shutdown was requested."""
+        if self._interrupt_requested:
+            raise KeyboardInterrupt("Interrupt flag set")
 
     def _clear_pause_file(self):
         try:
@@ -774,7 +762,15 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             raise RuntimeError(
                 f"Login submission returned status {login_resp.status_code}")
 
-        if "logout" not in login_resp.text.lower():
+        # Verify on a non-login page instead of trusting the login response.
+        verify_url = _build_full_url(site_url, "/")
+        try:
+            verify_resp = await client.get(verify_url)
+        except httpx.HTTPError as e:
+            await client.aclose()
+            raise RuntimeError(f"Login verification fetch failed: {e}")
+
+        if not _is_logged_in(verify_resp.text):
             await client.aclose()
             raise RuntimeError("Login failed — check credentials")
 
@@ -810,20 +806,6 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                     "reason": str(exc),
                 })
         return results
-
-    async def get_series_count_for_site(self, site_url: str) -> int:
-        """Fetch the series catalogue for a site and return the number of entries."""
-        previous_site_url = self.site_url
-        try:
-            self.site_url = site_url
-            client = await self._create_logged_in_client()
-            try:
-                series = await self._get_all_series(client)
-            finally:
-                await client.aclose()
-            return len(series)
-        finally:
-            self.site_url = previous_site_url
 
     async def get_series_slugs_for_site(self, site_url: str) -> set[str]:
         """Fetch the series catalogue for a site and return a set of slugs."""
@@ -1157,6 +1139,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
         try:
             while True:
+                self._check_interrupt_flag()
                 if self._check_pause():
                     raise ScrapingPaused("Pause file detected")
 
@@ -1701,7 +1684,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             self.save_checkpoint(include_data=True)
             if self.failed_links:
                 self.save_failed_series()
-        except BaseException:
+        except (KeyboardInterrupt, SystemExit):
             self.save_checkpoint(include_data=True)
             if self.failed_links:
                 self.save_failed_series()

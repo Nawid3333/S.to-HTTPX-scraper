@@ -8,12 +8,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables from .env file at import time so every module
+# that imports from this config sees the correct values immediately.
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-
-# Credentials (store in .env file)
-EMAIL = os.getenv("STO_EMAIL", "")
-PASSWORD = os.getenv("STO_PASSWORD", "")
 
 
 def _validate_and_normalize_url(url: str) -> str:
@@ -53,6 +50,8 @@ _STO_FALLBACK_SITE_URLS = []
 # _STO_FALLBACK_SITE_URLS.append(_validate_and_normalize_url("https://example.com"))
 
 # Built-in fallback domains
+# NOTE: The IP fallback only supports HTTP (no TLS). It is a last-resort
+# fallback — credentials are sent unencrypted when this host is used.
 _BUILTIN_FALLBACK_URLS = [
     "http://186.2.175.5/",
 ]
@@ -85,14 +84,9 @@ for url in SITE_URLS:
     except Exception:
         pass
 
-DEFAULT_FALLBACK_SITE_URL = _STO_FALLBACK_SITE_URLS[0] if _STO_FALLBACK_SITE_URLS else None
-
 # Data storage
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "..", "logs")
-
-Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
-Path(LOGS_DIR).mkdir(parents=True, exist_ok=True)
 
 SERIES_INDEX_FILE = os.path.join(DATA_DIR, "series_index.json")
 
@@ -100,7 +94,8 @@ SERIES_INDEX_FILE = os.path.join(DATA_DIR, "series_index.json")
 LOG_FILE = os.path.join(LOGS_DIR, "s_to_backup.log")
 
 # Scraping configuration (edit here, not in .env)
-NUM_WORKERS = 10  # Number of parallel httpx sessions
+# Number of parallel httpx sessions
+NUM_WORKERS = int(os.getenv("STO_MAX_WORKERS", "10"))
 
 # Checkpoint frequency: serialize resume state every N completed series.
 # Large index (≈58 MB) → less frequent to avoid event-loop blocking.
@@ -114,5 +109,12 @@ HTTP_REQUEST_TIMEOUT = 20.0
 DEFAULT_BATCH_FILE_PATH = os.path.join(
     os.path.dirname(__file__), "..", "series_urls.txt")
 DEFAULT_BATCH_FILE = os.path.abspath(DEFAULT_BATCH_FILE_PATH)
+
+# Credentials (store in .env file)
+EMAIL = os.getenv("STO_EMAIL", "")
+PASSWORD = os.getenv("STO_PASSWORD", "")
+
+Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+Path(LOGS_DIR).mkdir(parents=True, exist_ok=True)
 
 print(f"✓ Config loaded (DATA_DIR: {os.path.abspath(DATA_DIR)})")

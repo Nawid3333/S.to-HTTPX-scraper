@@ -12,7 +12,7 @@ Uses **httpx** (no browser needed) with a multi-session architecture for fast, p
 - **Host probing** — checks all configured hosts before scraping, compares site series count with the local index, and writes a `mismatch_report.json` when differences or duplicate slugs are detected
 - **Duplicate slug detection** — finds duplicate slugs in the index and offers to delete them before continuing
 - **Smart per-series ETA estimation** — each series stores its own `avg_scrape_seconds` (exponential moving average for ETA prediction) and `scrape_duration_seconds` (actual duration of the most recent scrape) in the index. ETA is predicted by summing those per-series averages for the remaining work, then blended with the live session rate (historical 85%→45% as progress increases). Because the database is stable, per-series history is the best predictor.
-- **Checkpoint & resume** — automatically saves progress every 10 series; resume after interruptions (Ctrl+C safe)
+- **Checkpoint & resume** — automatically saves progress every 50 series; resume after interruptions (Ctrl+C safe)
 - **Subscription & watchlist tracking** — scrape series from your s.to account subscriptions/watchlist and track status per series
 - **New series detection** — detects newly added series on your account and lists them before scraping
 - **Vanished series detection** — alerts when series disappear from your account
@@ -29,7 +29,6 @@ Uses **httpx** (no browser needed) with a multi-session architecture for fast, p
 - **Report generation** — full or filtered (subscribed/watchlist) statistics with export
 - **Data integrity checks** — detects episode count drops, season removals, watched-status corruption, and title changes before merging; offers to delete & rescrape critical series
 - **Atomic file writes** — all JSON writes use temp file + replace to prevent corruption
-- **File locking** — prevents concurrent access corruption
 - **Disk space check** — warns before scraping if free space is below 100 MB
 - **Rotating log files** — 10 MB per file, 5 backups
 
@@ -55,7 +54,7 @@ STO_PASSWORD=yourpassword
 
 `.env` is used **only for credentials**. All other settings (site URLs, fallback domains, workers, timeout, batch file paths) live in `config/config.py`.
 
-The default batch file is `series_urls.txt` next to `main.py`. To change it, edit `DEFAULT_BATCH_FILE_PATH` in `config/config.py`.
+The default batch file is `series_urls.txt` next to `main.py`. To change it, edit `DEFAULT_BATCH_FILE` in `config/config.py`.
 
 Site URL and fallback domains are also defined in `config/config.py`:
 

@@ -30,11 +30,13 @@ from config.config import (  # noqa: E402  # pylint: disable=import-error,no-nam
     EMAIL, PASSWORD, DATA_DIR, SERIES_INDEX_FILE, LOG_FILE, SITE_URL, SITE_URLS,
     DEFAULT_BATCH_FILE,
 )
+
 from src.scraper import SToScraper  # noqa: E402  # pylint: disable=wrong-import-position
 from src.index_manager import (  # noqa: E402  # pylint: disable=wrong-import-position
     IndexManager, confirm_and_save_changes, show_vanished_series,
     _extract_slug_from_field, get_episode_counts,
-    remove_series_from_index,
+    remove_series_from_index, _is_valid_series_url,
+    _build_merged_data,
 )
 
 
@@ -67,9 +69,6 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-ACTIVE_SITE_URL = None
-
-_SERIE_URL_RE = re.compile(r'/serie/[^/]+')
 
 _MODE_LABELS = {
     'all_series': 'Scrape all series (option 1)',
@@ -90,10 +89,13 @@ def print_header():
     print("=" * 60)
 
 
-def print_completed_series_alerts(index_manager=None):
+def print_completed_series_alerts(index_manager=None, allow_rescrape=True):
     """Alert user about series that need attention:
     1. Fully watched but not subscribed
     2. Ongoing (started but incomplete) but not on watchlist
+
+    When allow_rescrape is False, the rescrape prompt is suppressed
+    (used to prevent recursive prompts during a rescrape).
     """
     try:
         if index_manager is None:
@@ -126,21 +128,24 @@ def print_completed_series_alerts(index_manager=None):
             print("  Consider subscribing or leaving as-is.")
             print("⚠" * 35)
 
-            rescrape = input(
-                "\nRescrape these series to update Sub/WL status? (y/n): ").strip().lower()
-            if rescrape == 'y':
-                urls = [s.get('url')
-                        for s in completed_not_sub if s.get('url')]
-                if not urls:
-                    print("✗ No URLs found for these series")
-                else:
-                    print(f"\n→ Rescraping {len(urls)} completed series...")
-                    _run_scrape_and_save(
-                        run_kwargs={"url_list": urls, "parallel": False},
-                        description=f"Rescrape completed series ({len(urls)})",
-                        success_msg=f"Rescrape completed! {len(urls)} series updated.",
-                        no_data_msg="No data scraped",
-                    )
+            if allow_rescrape:
+                rescrape = input(
+                    "\nRescrape these series to update Sub/WL status? (y/n): ").strip().lower()
+                if rescrape == 'y':
+                    urls = [s.get('url')
+                            for s in completed_not_sub if s.get('url')]
+                    if not urls:
+                        print("✗ No URLs found for these series")
+                    else:
+                        print(
+                            f"\n→ Rescraping {len(urls)} completed series...")
+                        _run_scrape_and_save(
+                            run_kwargs={"url_list": urls, "parallel": False},
+                            description=f"Rescrape completed series ({len(urls)})",
+                            success_msg=f"Rescrape completed! {len(urls)} series updated.",
+                            no_data_msg="No data scraped",
+                            post_scrape_allow_rescrape=False,
+                        )
 
         if ongoing_no_wl:
             ongoing_no_wl.sort(key=lambda s: s.get('title', ''))
@@ -198,35 +203,21 @@ def show_menu():  # pylint: disable=too-many-branches
     print("  9. Exit\n")
 
 
-def _check_checkpoint(expected_mode):
+def _check_checkpoint():
     """Check for an existing checkpoint and prompt the user to resume or discard."""
     saved_mode = SToScraper.get_checkpoint_mode(DATA_DIR)
     if saved_mode is None:
         return {'ok': True, 'resume': False}
 
     saved_label = _MODE_LABELS.get(saved_mode, saved_mode)
-    expected_label = _MODE_LABELS.get(expected_mode, expected_mode)
     checkpoint_file = os.path.join(DATA_DIR, '.scrape_checkpoint.json')
 
-    if saved_mode == expected_mode:
-        print(f"\n⚠ Checkpoint found from a previous \"{saved_label}\" run!\n")
-        choice = input("Resume from checkpoint? (y/n): ").strip().lower()
-        if choice == 'y':
-            return {'ok': True, 'resume': True}
-        discard = input(
-            "Discard old checkpoint and start fresh? (y/n): ").strip().lower()
-        if discard == 'y':
-            try:
-                os.remove(checkpoint_file)
-            except OSError:
-                pass
-            return {'ok': True, 'resume': False}
-        return {'ok': False, 'resume': False}
-
-    print(f"\n⚠ A checkpoint exists from a different mode: \"{saved_label}\"")
-    print(f"   You are about to run: \"{expected_label}\"\n")
+    print(f"\n⚠ Checkpoint found from a previous \"{saved_label}\" run!\n")
+    choice = input("Resume from checkpoint? (y/n): ").strip().lower()
+    if choice == 'y':
+        return {'ok': True, 'resume': True}
     discard = input(
-        "Discard the old checkpoint and continue? (y/n): ").strip().lower()
+        "Discard old checkpoint and start fresh? (y/n): ").strip().lower()
     if discard == 'y':
         try:
             os.remove(checkpoint_file)
@@ -312,28 +303,37 @@ def _collect_index_slugs(idx_mgr):
     return set(index_slugs_list), index_duplicates, index_entries_without_slug
 
 
-def _save_mismatch_report(report_path, count, idx_count, index_slugs, site_slugs,
-                          only_in_index, only_on_site, index_duplicates,
-                          index_entries_without_slug):
-    """Write a mismatch report JSON and log the result."""
+def _save_combined_mismatch_report(report_path, idx_mgr, host_reports):
+    """Write a single combined mismatch report covering all probed hosts."""
+    index_slugs, index_duplicates, index_entries_without_slug = _collect_index_slugs(
+        idx_mgr)
     report = {
         'generated': datetime.now().isoformat(),
-        'site_count': count,
-        'index_count': idx_count,
+        'index_count': len(idx_mgr.series_index),
         'index_unique_slugs': len(index_slugs),
-        'site_unique_slugs': len(site_slugs),
         'index_entries_without_slug_count': len(index_entries_without_slug),
-        'only_in_index': sorted(only_in_index),
-        'only_on_site': sorted(only_on_site),
-        'index_duplicates': index_duplicates,
         'index_entries_without_slug': index_entries_without_slug,
+        'index_duplicates': index_duplicates,
+        'hosts': host_reports,
     }
     with open(report_path, 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
-    print(f"    📄 Mismatch report saved: {report_path}")
-    logger.info(
-        "Mismatch report saved: %d only-in-index, %d only-on-site, %d index duplicates",
-        len(only_in_index), len(only_on_site), len(index_duplicates))
+    in_only_set = set().union(*(set(h.get('only_in_index', []))
+                                for h in host_reports))
+    on_only_set = set().union(*(set(h.get('only_on_site', []))
+                                for h in host_reports))
+    dup_count = len(index_duplicates)
+    has_mismatch = in_only_set or on_only_set or dup_count
+    if has_mismatch:
+        print(
+            f"\n  Mismatch report: {len(host_reports)} host | in-index: {len(in_only_set)} | "
+            f"on-site: {len(on_only_set)} | dups: {dup_count}"
+        )
+    logger.debug(
+        "Combined mismatch report saved: %d hosts, %d only-in-index unique, "
+        "%d only-on-site unique, %d index duplicates",
+        len(host_reports), len(in_only_set), len(on_only_set), dup_count,
+    )
 
 
 def _remove_duplicate_index_entries(idx_mgr, index_duplicates):
@@ -364,71 +364,78 @@ def _remove_duplicate_index_entries(idx_mgr, index_duplicates):
 
 
 def _cross_check_index(scraper, site_url, count, idx_mgr=None):
-    """Compare site slugs against the local index and report mismatches.
+    """Compare site slugs against the local index for one host.
 
     idx_mgr can be passed in to avoid reloading the index repeatedly.
 
-    Returns a tuple (idx_count, compare_txt) to display in the host table,
-    or (None, None) when the index is empty or data is unavailable.
+    Returns a tuple (idx_count, compare_txt, report_entry):
+      - idx_count: number of entries in the local index, or None.
+      - compare_txt: short status string for the host table.
+      - report_entry: dict with per-host mismatch details (or None if skipped).
     """
     if idx_mgr is None:
         idx_mgr = IndexManager(SERIES_INDEX_FILE)
     idx_count = len(idx_mgr.series_index)
     if idx_count == 0:
-        return None, None
+        return None, None, None
 
     diff = idx_count - count
     if diff == 0:
-        return idx_count, "match"
+        return idx_count, "match", {
+            "host": site_url,
+            "site_count": count,
+            "site_unique_slugs": count,
+            "only_in_index": [],
+            "only_on_site": [],
+            "compare": "match",
+        }
 
     sign = '+' if diff > 0 else ''
+    compare_txt = f"mismatch ({sign}{diff})"
 
     site_slugs = _fetch_site_slugs_for_host(scraper, site_url)
     if site_slugs is None:
         logger.warning(
             "Cannot compare slugs because site slug list is unavailable.")
-        return idx_count, f"mismatch ({sign}{diff})"
+        return idx_count, compare_txt, {
+            "host": site_url,
+            "site_count": count,
+            "site_unique_slugs": None,
+            "only_in_index": [],
+            "only_on_site": [],
+            "compare": compare_txt,
+        }
 
     index_slugs, index_duplicates, index_entries_without_slug = _collect_index_slugs(
         idx_mgr)
-    only_in_index = index_slugs - site_slugs
-    only_on_site = site_slugs - index_slugs
-    has_real_mismatch = bool(only_in_index or index_duplicates)
+    only_in_index = sorted(index_slugs - site_slugs)
+    only_on_site = sorted(site_slugs - index_slugs)
 
-    report_path = os.path.join(DATA_DIR, 'mismatch_report.json')
-    if has_real_mismatch:
-        _save_mismatch_report(
-            report_path, count, idx_count, index_slugs, site_slugs,
-            only_in_index, only_on_site, index_duplicates,
-            index_entries_without_slug)
-        logger.info("Mismatch report created: %s", report_path)
-    else:
-        if os.path.exists(report_path):
-            os.remove(report_path)
-        logger.debug(
-            "Index count %d is below site count %d; no mismatch report generated",
-            idx_count, count)
+    report_entry = {
+        "host": site_url,
+        "site_count": count,
+        "site_unique_slugs": len(site_slugs),
+        "only_in_index": only_in_index,
+        "only_on_site": only_on_site,
+        "compare": compare_txt,
+    }
 
-    if index_duplicates:
-        _remove_duplicate_index_entries(idx_mgr, index_duplicates)
-
-    return idx_count, f"mismatch ({sign}{diff})"
+    return idx_count, compare_txt, report_entry
 
 
-def _probe_sites_before_scrape(scraper, idx_mgr=None):
+def _probe_sites_before_scrape(scraper):
     """Probe configured hosts, show OK/FAILED, and auto-select the first working one.
 
     This function is always called from a synchronous context (the main menu loop),
     so asyncio.run() is the correct way to execute async coroutines here.
     """
-    global ACTIVE_SITE_URL  # pylint: disable=global-statement
     site_urls = SITE_URLS or [SITE_URL]
     if not site_urls:
+        scraper.site_url = SITE_URL
         return SITE_URL
 
     # Load the index once and reuse it for every host cross-check.
-    if idx_mgr is None:
-        idx_mgr = IndexManager(SERIES_INDEX_FILE)
+    idx_mgr = IndexManager(SERIES_INDEX_FILE)
 
     print("\n→ Checking host availability...\n")
     results = _probe_hosts(scraper, site_urls)
@@ -436,6 +443,7 @@ def _probe_sites_before_scrape(scraper, idx_mgr=None):
     ok_hosts = []
     host_counts = {}
     table_rows = []
+    host_reports = []
 
     for entry in results:
         site_url = entry['site_url']
@@ -451,17 +459,31 @@ def _probe_sites_before_scrape(scraper, idx_mgr=None):
             count = len(site_slugs) if site_slugs is not None else None
             host_counts[site_url] = count
             if count is not None:
-                idx_count, compare_txt = _cross_check_index(
+                idx_count, compare_txt, report_entry = _cross_check_index(
                     scraper, site_url, count, idx_mgr=idx_mgr)
+                if report_entry:
+                    host_reports.append(report_entry)
 
         table_rows.append((label, ok, count, idx_count, compare_txt))
 
     for line in _format_host_rows(table_rows):
         print(line)
 
+    if host_reports:
+        report_path = os.path.join(DATA_DIR, 'mismatch_report.json')
+        _save_combined_mismatch_report(report_path, idx_mgr, host_reports)
+
+    _, index_duplicates, _ = _collect_index_slugs(idx_mgr)
+    if index_duplicates:
+        _remove_duplicate_index_entries(idx_mgr, index_duplicates)
+
+    print()
     scraper.site_url = ok_hosts[0] if ok_hosts else SITE_URL
     suffix = "" if ok_hosts else " (default)"
-    print(f"\n→ Active host: {scraper.site_url}{suffix}")
+    print(f"→ Active host: {scraper.site_url}{suffix}")
+    if scraper.site_url.startswith("http://"):
+        print("  ⚠ WARNING: Active host is unencrypted (HTTP) — "
+              "credentials sent in cleartext.")
 
     if len(ok_hosts) >= 2:
         counts = [
@@ -474,27 +496,27 @@ def _probe_sites_before_scrape(scraper, idx_mgr=None):
         else:
             print("→ Cross-host counts: match = False")
 
-    ACTIVE_SITE_URL = scraper.site_url
     return scraper.site_url
 
 
 def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
-                         pre_save_hook=None, vanished_scope=None):
+                         pre_save_hook=None, vanished_scope=None,
+                         post_scrape_allow_rescrape=True):
     """Common pattern: create scraper, run, confirm & save, handle errors.
 
     Args:
         pre_save_hook: Optional callable(scraper, pre_index) called after scraping
                        but before confirm_and_save. Can modify scraper.series_data.
         vanished_scope: Override scope for show_vanished_series (default: auto-detect).
+        post_scrape_allow_rescrape: If False, suppress the completed-series
+                                     rescrape prompt after this scrape (prevents
+                                     recursive prompts).
     """
     pre_index = IndexManager(SERIES_INDEX_FILE) if pre_save_hook else None
     t_start = time.perf_counter()
     try:
         scraper = SToScraper()
-        if ACTIVE_SITE_URL:
-            scraper.site_url = ACTIVE_SITE_URL
-        else:
-            _probe_sites_before_scrape(scraper)
+        _probe_sites_before_scrape(scraper)
         scraper.run(**run_kwargs)
 
         if scraper.series_data:
@@ -530,10 +552,12 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
                     description=f"Rescrape critical series ({n})",
                     success_msg=f"Critical series rescraping completed! {n} series updated.",
                     no_data_msg="No data scraped for critical series",
+                    post_scrape_allow_rescrape=False,
                 )
             elif result:
                 print(f"\n✓ {success_msg}")
-                print_completed_series_alerts(index_manager)
+                print_completed_series_alerts(
+                    index_manager, allow_rescrape=post_scrape_allow_rescrape)
                 logger.info(success_msg)
                 # Final cross-check: scraped count vs index count (full scrapes only)
                 if scraper.all_discovered_series is not None:
@@ -616,7 +640,7 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
 def scrape_all_series():
     print("\n→ Starting S.TO scraper (httpx)...\n")
 
-    chk = _check_checkpoint('all_series')
+    chk = _check_checkpoint()
     if not chk['ok']:
         print("✗ Cancelled")
         return
@@ -643,7 +667,7 @@ def scrape_all_series():
 def scrape_new_series():
     print("\n→ Starting S.TO scraper — NEW series only (httpx)...\n")
 
-    chk = _check_checkpoint('new_only')
+    chk = _check_checkpoint()
     if not chk['ok']:
         print("✗ Cancelled")
         return
@@ -683,7 +707,7 @@ def scrape_unwatched():
     print(
         f"  Found {len(unwatched_urls)} unwatched/ongoing series (skipping {skipped} fully watched)\n")
 
-    chk = _check_checkpoint('unwatched')
+    chk = _check_checkpoint()
     if not chk['ok']:
         print("✗ Cancelled")
         return
@@ -742,8 +766,7 @@ def single_or_batch_add():
 
 def add_single_series(url):
     print(f"\n→ Scraping single series: {url}\n")
-    parsed = urlparse(url)
-    if not _SERIE_URL_RE.search(parsed.path):
+    if not _is_valid_series_url(url):
         print("✗ Invalid s.to series URL format")
         return
 
@@ -768,7 +791,7 @@ def batch_add_from_file(file_path):
                 if parsed.scheme and parsed.scheme not in ('http', 'https'):
                     skipped.append((line_num, url))
                     continue
-                if not _SERIE_URL_RE.search(parsed.path):
+                if not _is_valid_series_url(url):
                     skipped.append((line_num, url))
                     continue
                 urls.append(url)
@@ -799,7 +822,7 @@ def batch_add_from_file(file_path):
         print("✗ Cancelled")
         return
 
-    chk = _check_checkpoint('batch')
+    chk = _check_checkpoint()
     if not chk['ok']:
         print("✗ Cancelled")
         return
@@ -1041,7 +1064,7 @@ def scrape_subscribed_watchlist():
         return
     source = {'1': 'subscribed', '2': 'watchlist'}.get(sub_choice, 'both')
 
-    chk = _check_checkpoint(source)
+    chk = _check_checkpoint()
     if not chk['ok']:
         print("✗ Cancelled")
         return
@@ -1063,7 +1086,7 @@ def retry_failed_series():
     """Retry previously failed series in sequential mode"""
     print("\n→ Retry failed series from last run\n")
 
-    chk = _check_checkpoint('retry')
+    chk = _check_checkpoint()
     if not chk['ok']:
         print("✗ Cancelled")
         return
@@ -1120,7 +1143,7 @@ def main():
             sys.exit(1)
 
     scraper = SToScraper()
-    _probe_sites_before_scrape(scraper, idx_mgr=idx_mgr)
+    _probe_sites_before_scrape(scraper)
 
     while True:
         show_menu()
