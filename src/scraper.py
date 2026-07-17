@@ -776,39 +776,46 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
         return client
 
-    async def probe_sites(self, site_urls: list[str] | None = None) -> list[dict]:
-        """Probe multiple site URLs and report whether each responds as expected."""
-        urls = site_urls or [PRIMARY_SITE_URL] + FALLBACK_SITE_URLS
-        results = []
-        for site_url in urls:
-            try:
-                client = httpx.AsyncClient(
-                    headers={"User-Agent": UA},
-                    timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
-                    follow_redirects=True,
-                    limits=httpx.Limits(max_connections=2,
-                                        max_keepalive_connections=1),
-                )
-                async with client as session:
-                    resp = await session.get(_build_full_url(site_url, LOGIN_PATH))
-                ok = resp.status_code < 500 and "login" in resp.text.lower()
-                results.append({
-                    "site_url": site_url,
-                    "ok": ok,
-                    "status_code": resp.status_code,
-                    "reason": "reachable" if ok else "unexpected response",
-                })
-            except Exception as exc:
-                results.append({
-                    "site_url": site_url,
-                    "ok": False,
-                    "status_code": None,
-                    "reason": str(exc),
-                })
-        return results
+    async def _probe_one_site(self, site_url: str) -> dict:
+        """Return probe result for a single site URL."""
+        try:
+            client = httpx.AsyncClient(
+                headers={"User-Agent": UA},
+                timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
+                follow_redirects=True,
+                limits=httpx.Limits(max_connections=2,
+                                    max_keepalive_connections=1),
+            )
+            async with client as session:
+                resp = await session.get(_build_full_url(site_url, LOGIN_PATH))
+            ok = resp.status_code < 500 and "login" in resp.text.lower()
+            return {
+                "site_url": site_url,
+                "ok": ok,
+                "status_code": resp.status_code,
+                "reason": "reachable" if ok else "unexpected response",
+            }
+        except Exception as exc:
+            return {
+                "site_url": site_url,
+                "ok": False,
+                "status_code": None,
+                "reason": str(exc),
+            }
 
-    async def get_series_slugs_for_site(self, site_url: str) -> set[str]:
-        """Fetch the series catalogue for a site and return a set of slugs."""
+    async def probe_sites(self, site_urls: list[str] | None = None) -> list[dict]:
+        """Probe multiple site URLs in parallel and report availability."""
+        urls = site_urls or [PRIMARY_SITE_URL] + FALLBACK_SITE_URLS
+        return list(await asyncio.gather(*[self._probe_one_site(u) for u in urls]))
+
+    async def get_catalogue_info_for_site(
+        self, site_url: str,
+    ) -> tuple[int | None, set[str]]:
+        """Login once, fetch the catalogue once, and return (count, slugs).
+
+        This avoids the duplicate login + full-page download that happened
+        when count and slugs were fetched in separate calls.
+        """
         previous_site_url = self.site_url
         try:
             self.site_url = site_url
@@ -822,9 +829,25 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 slug = self.get_series_slug_from_url(s.get('link', ''))
                 if slug and slug != 'unknown':
                     slugs.add(slug)
-            return slugs
+            return len(series), slugs
+        except Exception as exc:
+            logger.error(
+                "Error fetching catalogue info from %s: %s", site_url, exc)
+            return None, set()
         finally:
             self.site_url = previous_site_url
+
+    # Kept for backwards compatibility; prefer get_catalogue_info_for_site.
+    async def get_series_count_for_site(self, site_url: str) -> int | None:
+        """Fetch the series catalogue for a site and return the number of entries."""
+        count, _ = await self.get_catalogue_info_for_site(site_url)
+        return count
+
+    # Kept for backwards compatibility; prefer get_catalogue_info_for_site.
+    async def get_series_slugs_for_site(self, site_url: str) -> set[str]:
+        """Fetch the series catalogue for a site and return a set of slugs."""
+        _, slugs = await self.get_catalogue_info_for_site(site_url)
+        return slugs
 
     async def _create_logged_in_client(self) -> httpx.AsyncClient:
         """Create a logged-in HTTP client for the currently selected site.

@@ -275,16 +275,6 @@ def _probe_hosts(scraper, site_urls):
         return []
 
 
-def _fetch_site_slugs_for_host(scraper, site_url):
-    """Fetch site slugs for a reachable host; return None on error."""
-    try:
-        return asyncio.run(scraper.get_series_slugs_for_site(site_url))
-    except Exception as exc:
-        logger.warning(
-            "Could not fetch series slugs for %s: %s", site_url, exc)
-        return None
-
-
 def _collect_index_slugs(idx_mgr):
     """Collect slugs from the local index, including entries without a slug."""
     index_slugs_list = []
@@ -366,10 +356,11 @@ def _remove_duplicate_index_entries(idx_mgr, index_duplicates):
         len(removed_titles), sorted(index_duplicates))
 
 
-def _cross_check_index(scraper, site_url, count, idx_mgr=None):
+def _cross_check_index(scraper, site_url, count, idx_mgr=None, site_slugs=None):
     """Compare site slugs against the local index for one host.
 
     idx_mgr can be passed in to avoid reloading the index repeatedly.
+    site_slugs can be passed in if already fetched by the caller.
 
     Returns a tuple (idx_count, compare_txt, report_entry):
       - idx_count: number of entries in the local index, or None.
@@ -396,7 +387,6 @@ def _cross_check_index(scraper, site_url, count, idx_mgr=None):
     sign = '+' if diff > 0 else ''
     compare_txt = f"mismatch ({sign}{diff})"
 
-    site_slugs = _fetch_site_slugs_for_host(scraper, site_url)
     if site_slugs is None:
         logger.warning(
             "Cannot compare slugs because site slug list is unavailable.")
@@ -426,8 +416,21 @@ def _cross_check_index(scraper, site_url, count, idx_mgr=None):
     return idx_count, compare_txt, report_entry
 
 
+def _fetch_catalogue_info_for_host(scraper, site_url):
+    """Fetch count and slug set in one login/catalogue pass; return (count, slugs)."""
+    try:
+        return asyncio.run(scraper.get_catalogue_info_for_site(site_url))
+    except Exception as exc:
+        logger.warning(
+            "Could not fetch catalogue info for %s: %s", site_url, exc)
+        return None, set()
+
+
 def _probe_sites_before_scrape(scraper):
     """Probe configured hosts, show OK/FAILED, and auto-select the first working one.
+
+    Uses a single catalogue fetch per host to get both the series count and
+    the slug set used for index cross-checking.
 
     This function is always called from a synchronous context (the main menu loop),
     so asyncio.run() is the correct way to execute async coroutines here.
@@ -458,12 +461,13 @@ def _probe_sites_before_scrape(scraper):
 
         if ok:
             ok_hosts.append(site_url)
-            site_slugs = _fetch_site_slugs_for_host(scraper, site_url)
-            count = len(site_slugs) if site_slugs is not None else None
+            count, site_slugs = _fetch_catalogue_info_for_host(
+                scraper, site_url)
             host_counts[site_url] = count
             if count is not None:
                 idx_count, compare_txt, report_entry = _cross_check_index(
-                    scraper, site_url, count, idx_mgr=idx_mgr)
+                    scraper, site_url, count, idx_mgr=idx_mgr,
+                    site_slugs=site_slugs)
                 if report_entry:
                     host_reports.append(report_entry)
 
