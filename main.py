@@ -521,7 +521,8 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
     t_start = time.perf_counter()
     try:
         scraper = SToScraper()
-        _probe_sites_before_scrape(scraper)
+        # Use the host selected once at startup; never re-probe during a run.
+        scraper.site_url = ACTIVE_SITE_URL
         scraper.run(**run_kwargs)
 
         if scraper.series_data:
