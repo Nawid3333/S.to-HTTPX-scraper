@@ -670,7 +670,7 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
 def scrape_all_series():
     print("\n→ Starting S.TO scraper (httpx)...\n")
 
-    chk = _check_checkpoint()
+    chk = _check_checkpoint('all_series')
     if not chk['ok']:
         print("✗ Cancelled")
         return
@@ -697,7 +697,7 @@ def scrape_all_series():
 def scrape_new_series():
     print("\n→ Starting S.TO scraper — NEW series only (httpx)...\n")
 
-    chk = _check_checkpoint()
+    chk = _check_checkpoint('new_only')
     if not chk['ok']:
         print("✗ Cancelled")
         return
@@ -737,7 +737,7 @@ def scrape_unwatched():
     print(
         f"  Found {len(unwatched_urls)} unwatched/ongoing series (skipping {skipped} fully watched)\n")
 
-    chk = _check_checkpoint()
+    chk = _check_checkpoint('unwatched')
     if not chk['ok']:
         print("✗ Cancelled")
         return
@@ -852,7 +852,7 @@ def batch_add_from_file(file_path):
         print("✗ Cancelled")
         return
 
-    chk = _check_checkpoint()
+    chk = _check_checkpoint('batch')
     if not chk['ok']:
         print("✗ Cancelled")
         return
@@ -1094,7 +1094,7 @@ def scrape_subscribed_watchlist():
         return
     source = {'1': 'subscribed', '2': 'watchlist'}.get(sub_choice, 'both')
 
-    chk = _check_checkpoint()
+    chk = _check_checkpoint(source)
     if not chk['ok']:
         print("✗ Cancelled")
         return
@@ -1116,7 +1116,7 @@ def retry_failed_series():
     """Retry previously failed series in sequential mode"""
     print("\n→ Retry failed series from last run\n")
 
-    chk = _check_checkpoint()
+    chk = _check_checkpoint('retry')
     if not chk['ok']:
         print("✗ Cancelled")
         return

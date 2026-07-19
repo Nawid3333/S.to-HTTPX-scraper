@@ -1546,16 +1546,16 @@ def remove_series_from_index(index_file, titles_to_remove):
         return 0
 
 
-def _save_mismatch_report(vanished_entries, index_file):
-    """Save mismatched/vanished entries to a JSON file for later review.
+def _save_vanished_series_report(vanished_entries, index_file):
+    """Save vanished-series entries to a JSON file for later review.
 
-    Writes to data/mismatch_report.json alongside the index file.
+    Writes to data/vanished_series_report.json alongside the index file.
     """
     if not index_file or not vanished_entries:
         return
     try:
         report_path = os.path.join(os.path.dirname(
-            index_file), 'mismatch_report.json')
+            index_file), 'vanished_series_report.json')
         report = {
             'generated': datetime.now().isoformat(),
             'count': len(vanished_entries),
@@ -1566,11 +1566,11 @@ def _save_mismatch_report(vanished_entries, index_file):
         }
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
-        print(f"  📄 Mismatch report saved: {report_path}")
-        logger.info("Mismatch report saved with %d entries to %s",
+        print(f"  📄 Vanished series report saved: {report_path}")
+        logger.info("Vanished series report saved with %d entries to %s",
                     len(vanished_entries), report_path)
     except Exception as exc:
-        logger.warning("Failed to save mismatch report: %s", exc)
+        logger.warning("Failed to save vanished series report: %s", exc)
 
 
 def _prompt_vanished_deletions(vanished_entries):
@@ -1684,7 +1684,7 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_fil
         print(separator)
 
         # Save mismatched entries to JSON for later review
-        _save_mismatch_report(vanished, index_file)
+        _save_vanished_series_report(vanished, index_file)
 
         # Only offer deletion for full catalog scopes
         if scrape_scope in ('all', 'new_only'):
