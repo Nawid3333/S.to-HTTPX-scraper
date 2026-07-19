@@ -206,8 +206,12 @@ def show_menu():  # pylint: disable=too-many-branches
     print("  9. Exit\n")
 
 
-def _check_checkpoint():
-    """Check for an existing checkpoint and prompt the user to resume or discard."""
+def _check_checkpoint(expected_mode=None):
+    """Check for an existing checkpoint and prompt the user to resume or discard.
+
+    When expected_mode is provided, also handles mode mismatches
+    (e.g. checkpoint from 'all_series' when user wants 'new_only').
+    """
     saved_mode = SToScraper.get_checkpoint_mode(DATA_DIR)
     if saved_mode is None:
         return {'ok': True, 'resume': False}
@@ -215,12 +219,26 @@ def _check_checkpoint():
     saved_label = _MODE_LABELS.get(saved_mode, saved_mode)
     checkpoint_file = os.path.join(DATA_DIR, '.scrape_checkpoint.json')
 
-    print(f"\n⚠ Checkpoint found from a previous \"{saved_label}\" run!\n")
-    choice = input("Resume from checkpoint? (y/n): ").strip().lower()
-    if choice == 'y':
-        return {'ok': True, 'resume': True}
+    if expected_mode is None or saved_mode == expected_mode:
+        print(f"\n⚠ Checkpoint found from a previous \"{saved_label}\" run!\n")
+        choice = input("Resume from checkpoint? (y/n): ").strip().lower()
+        if choice == 'y':
+            return {'ok': True, 'resume': True}
+        discard = input(
+            "Discard old checkpoint and start fresh? (y/n): ").strip().lower()
+        if discard == 'y':
+            try:
+                os.remove(checkpoint_file)
+            except OSError:
+                pass
+            return {'ok': True, 'resume': False}
+        return {'ok': False, 'resume': False}
+
+    expected_label = _MODE_LABELS.get(expected_mode, expected_mode)
+    print(f"\n⚠ A checkpoint exists from a different mode: \"{saved_label}\"")
+    print(f"   You are about to run: \"{expected_label}\"\n")
     discard = input(
-        "Discard old checkpoint and start fresh? (y/n): ").strip().lower()
+        "Discard the old checkpoint and continue? (y/n): ").strip().lower()
     if discard == 'y':
         try:
             os.remove(checkpoint_file)
@@ -570,7 +588,7 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
                 print_completed_series_alerts(
                     index_manager, allow_rescrape=post_scrape_allow_rescrape)
                 logger.info(success_msg)
-                # Final cross-check: scraped count vs index count (full scrapes only)
+                # Final cross-check: scraped count vs index count
                 if scraper.all_discovered_series is not None:
                     scraped_count = len(scraper.series_data)
                     idx_count = len(index_manager.series_index)
@@ -582,7 +600,7 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
                         print(
                             f"  Index count: {idx_count}  →  match = False ({sign}{diff} difference)")
                         print(
-                            "  → Run a full scrape (option 1) to detect vanished/renamed series.")
+                            "  → Vanished/renamed series were already checked above.")
         else:
             if run_kwargs.get('retry_failed') and scraper.failed_links:
                 n = len(scraper.failed_links)
