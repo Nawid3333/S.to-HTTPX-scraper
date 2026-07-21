@@ -63,6 +63,8 @@ SITE_URL = "https://s.to"
 STO_FALLBACK_SITE_URL = "https://serienstream.to"
 ```
 
+Built-in fallback hosts: `serienstream.to`, `186.2.175.5` (HTTP, no TLS).
+
 Scraping parallelism and request timeout can be adjusted in `config/config.py`:
 
 ```python
@@ -182,4 +184,4 @@ Nawid Salehie
 
 ## License
 
-Private project — not licensed for redistribution.
+GNU General Public License v3.0 — see [LICENSE](LICENSE) for details.
