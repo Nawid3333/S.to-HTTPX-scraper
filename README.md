@@ -89,8 +89,9 @@ python main.py
 | 5   | **Single link / batch add**     | Add a single series by URL, or batch-import from a text file.              |
 | 6   | **Scrape subscribed/watchlist** | Fetch series from your s.to subscription or watchlist pages.               |
 | 7   | **Retry failed scrapes**        | Bulk retry all series that failed in previous runs.                        |
-| 8   | **Pause scraping**              | Creates `.pause_scraping` flag file for graceful worker pause.             |
-| 9   | **Exit**                        | Clean exit.                                                                |
+| 8   | **Exit**                        | Clean exit.                                                                |
+
+> **Pausing scraping:** there is no dedicated menu option. To gracefully pause workers, create a `.pause_scraping` file in the `data/` directory (see [Pause/resume](#pauseresume) below).
 
 ### Scraping Modes (Option 1)
 
@@ -127,6 +128,18 @@ Filter options:
 
 After report generation, you can export ongoing series URLs back to the default batch file (`series_urls.txt` by default).
 
+## Pause/resume
+
+There is no menu option for pausing. To gracefully pause a running scrape, create an empty `.pause_scraping` file in the `data/` directory:
+
+```bash
+# from the project folder
+touch data/.pause_scraping          # Linux / macOS
+New-Item data\.pause_scraping -ItemType File   # PowerShell
+```
+
+Active workers check for this file periodically and finish their current series before stopping. The checkpoint is saved so you can resume the run later. Delete the file to allow new scrapes to run.
+
 ## Episode 0 / Ignored Seasons
 
 Some s.to series have "episode 0" entries that are placeholders with no watch links. These cause series to appear incomplete.
@@ -151,6 +164,34 @@ Only the `slug` and `season` fields are used for matching; `url`/`link` are opti
 | Season in ignore list but episode 0 is gone (stale) | Notification before rest of scrape; prompt to continue                        |
 
 When ignored-season series are found in a scrape, they are processed first (two-phase). If any new or stale entries are detected, the scraper prompts before continuing with remaining series.
+
+## Ignored Series
+
+Some series pages are empty, return a 404/502 error, or exist in the catalog with no real seasons. These make every scrape fail or show phantom unwatched entries.
+
+The file `data/.ignored_series.json` lists series to skip entirely during scraping. It is **not** created automatically; create it manually when needed:
+
+```json
+[
+  {
+    "url": "https://s.to/serie/empty-series",
+    "title": "Empty Series"
+  }
+]
+```
+
+Only the `url` field is required for matching; `title` is optional and informational. The slug is extracted from the URL automatically.
+
+**Behavior during scraping:**
+
+| Scenario                                               | Behavior                                                                                 |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| Series is in ignore list                               | Skipped entirely; not fetched, not counted, not included in reports                      |
+| Ignored series page is still empty / 404 / unreachable | Printed as `✓ {title}: still empty` during re-validation                                 |
+| Ignored series now has real season content             | Warning printed: `⚠ {title}: now available! Consider removing from .ignored_series.json` |
+| Ignored series no longer appears in the catalog        | Warning printed: consider removing the stale entry                                       |
+
+The scraper re-validates ignored series at the start of every run and checks them against the fetched catalog. It **does not** auto-add or auto-remove entries — all changes to `.ignored_series.json` are manual.
 
 ## Project Structure
 

@@ -5,6 +5,7 @@ Handles data merging, change detection, subscription/watchlist tracking, and ana
 """
 
 import copy
+import difflib
 import json
 import logging
 import os
@@ -764,58 +765,41 @@ class IndexManager:
 
 
 def _format_subscription_and_watchlist_changes(changes):
-    """Format subscription and watchlist changes into separated Added/Removed sections.
+    """Format subscription and watchlist changes into an aligned Action/Title table.
 
-    Returns a formatted string with sections for:
-    - Subscriptions Added
-    - Subscriptions Removed
-    - Watchlist Added
-    - Watchlist Removed
+    Returns a formatted string with two columns: Action and Title.
     """
-    output = []
+    rows = []
+    for title in sorted(changes.get('newly_subscribed', [])):
+        rows.append(("+ Subscribed", title))
+    for title in sorted(changes.get('newly_unsubscribed', [])):
+        rows.append(("- Unsubscribed", title))
+    for title in sorted(changes.get('watchlist_added', [])):
+        rows.append(("+ Watchlist", title))
+    for title in sorted(changes.get('watchlist_removed', [])):
+        rows.append(("- Watchlist", title))
 
-    subs_added = changes.get('newly_subscribed', [])
-    subs_removed = changes.get('newly_unsubscribed', [])
-    wl_added = changes.get('watchlist_added', [])
-    wl_removed = changes.get('watchlist_removed', [])
+    if not rows:
+        return "  (no subscription/watchlist changes)"
 
-    # Display subscriptions section
-    if subs_added or subs_removed:
-        output.append(f"[SUBSCRIPTIONS - ADDED] ({len(subs_added)})")
-        output.append("   " + "─"*66)
-        if subs_added:
-            for title in sorted(subs_added):
-                output.append(f"  + {title}")
-        else:
-            output.append("  (none)")
+    term_w = max(shutil.get_terminal_size().columns, 80)
+    action_w = max(len("+ Subscribed"), len("- Unsubscribed"),
+                   len("+ Watchlist"), len("- Watchlist"), len("Action"))
+    max_title = max((len(str(t)) for _, t in rows), default=len("Title"))
+    # indent (2) + action + gap (2) + title, capped by terminal width
+    title_w = min(max_title, max(term_w - action_w - 6, 20))
 
-        output.append(f"\n[SUBSCRIPTIONS - REMOVED] ({len(subs_removed)})")
-        output.append("   " + "─"*66)
-        if subs_removed:
-            for title in sorted(subs_removed):
-                output.append(f"  - {title}")
-        else:
-            output.append("  (none)")
+    def _trunc(text, width):
+        return text if len(text) <= width else text[:width - 1] + '…'
 
-    # Display watchlist section
-    if wl_added or wl_removed:
-        output.append(f"\n[WATCHLIST - ADDED] ({len(wl_added)})")
-        output.append("   " + "─"*66)
-        if wl_added:
-            for title in sorted(wl_added):
-                output.append(f"  + {title}")
-        else:
-            output.append("  (none)")
-
-        output.append(f"\n[WATCHLIST - REMOVED] ({len(wl_removed)})")
-        output.append("   " + "─"*66)
-        if wl_removed:
-            for title in sorted(wl_removed):
-                output.append(f"  - {title}")
-        else:
-            output.append("  (none)")
-
-    return "\n".join(output)
+    lines = [
+        f"  {'Action':<{action_w}}  {'Title':<{title_w}}",
+        f"  {'─' * action_w}  {'─' * title_w}",
+    ]
+    for action, title in rows:
+        lines.append(
+            f"  {action:<{action_w}}  {_trunc(title, title_w):<{title_w}}")
+    return "\n".join(lines)
 
 
 def _detect_episode_count_mismatches(old_data, new_dict):
@@ -1097,10 +1081,10 @@ def _prompt_episode_mismatches(mismatches, old_data=None, active_site_url=None):
             lines.extend(_format_mismatch_issue(issue))
         return "\n".join(lines)
 
-    # Display header
-    print("\n" + "━" * 70)
+    term_w = max(shutil.get_terminal_size().columns - 2, 40)
+    print("\n" + "━" * term_w)
     print(f"DATA INTEGRITY CHECK")
-    print("━" * 70)
+    print("━" * term_w)
 
     # Write integrity check issues to file only (no console logging)
     if critical + warning:
@@ -1124,7 +1108,7 @@ def _prompt_episode_mismatches(mismatches, old_data=None, active_site_url=None):
     # Show CRITICAL issues with pagination
     if critical:
         print(f"\nCRITICAL ISSUES ({len(critical)})")
-        print("───────────────────────────────────────────────────────────────────")
+        print("─" * term_w)
 
         formatted_critical = [_format_mismatch_entry(m) for m in critical]
         paginate_list(
@@ -1136,7 +1120,7 @@ def _prompt_episode_mismatches(mismatches, old_data=None, active_site_url=None):
     # Show WARNING issues with pagination
     if warning:
         print(f"\nWARNINGS ({len(warning)})")
-        print("───────────────────────────────────────────────────────────────────")
+        print("─" * term_w)
 
         formatted_warnings = [_format_mismatch_entry(m) for m in warning]
         paginate_list(
@@ -1145,12 +1129,12 @@ def _prompt_episode_mismatches(mismatches, old_data=None, active_site_url=None):
             page_size=5
         )
 
-    print("\n" + "━" * 70)
+    print("\n" + "━" * term_w)
 
     # Offer options for critical issues
     if critical:
         print(f"\nOPTIONS")
-        print("───────────────────────────────────────────────────────────────────")
+        print("─" * term_w)
         print(f"1) Proceed with merge despite issues")
         print(f"2) Delete index & rescrape {len(critical)} critical series")
         print(f"3) Cancel (discard all changes)\n")
@@ -1254,9 +1238,10 @@ def _prompt_change_confirmations(changes, new_dict):
         formatted_changes = _format_subscription_and_watchlist_changes(changes)
         print(f"\n[SUBSCRIPTION / WATCHLIST CHANGES] ({total})")
         print("   (manual confirmation required)")
-        print("\n" + "-"*70)
+        term_w = max(shutil.get_terminal_size().columns - 6, 40)
+        print("\n" + "─" * term_w)
         print(formatted_changes)
-        print("-"*70)
+        print("─" * term_w)
         resp = input(
             "\nAllow subscription/watchlist changes? (y/n): ").strip().lower()
         if resp == 'y':
@@ -1403,10 +1388,6 @@ def _build_merged_data(old_data, new_dict, allowed):
             old_entry['last_updated'] = datetime.now().isoformat()
             old_entry.setdefault('subscribed', False)
             old_entry.setdefault('watchlist', False)
-            if new_entry.get('fallback_url'):
-                old_entry['fallback_url'] = new_entry['fallback_url']
-            if new_entry.get('recent_url'):
-                old_entry['recent_url'] = new_entry['recent_url']
             # Preserve/update per-series scrape timing with exponential moving average.
             new_scrape_seconds = new_entry.get('scrape_duration_seconds')
             if isinstance(new_scrape_seconds, (int, float)) and new_scrape_seconds > 0:
@@ -1425,8 +1406,6 @@ def _build_merged_data(old_data, new_dict, allowed):
             merged[title] = {
                 'url': old_entry.get('url', ''),
                 'link': old_entry.get('link', ''),
-                'fallback_url': old_entry.get('fallback_url', ''),
-                'recent_url': old_entry.get('recent_url', ''),
                 'subscribed': old_entry.get('subscribed', False),
                 'watchlist': old_entry.get('watchlist', False),
                 'title': old_entry.get('title', title),
@@ -1473,8 +1452,6 @@ def _build_merged_data(old_data, new_dict, allowed):
             merged[title] = {
                 'url': new_entry.get('url', ''),
                 'link': new_entry.get('link', ''),
-                'fallback_url': new_entry.get('fallback_url', ''),
-                'recent_url': new_entry.get('recent_url', ''),
                 'subscribed': new_entry['subscribed'],
                 'watchlist': new_entry['watchlist'],
                 'title': new_entry.get('title', title),
@@ -1544,6 +1521,173 @@ def remove_series_from_index(index_file, titles_to_remove):
         return removed
     except (json.JSONDecodeError, OSError):
         return 0
+
+
+def _normalize_match_key(title):
+    """Return a lowercase, stripped title with year and common words removed.
+
+    Used to compare vanished vs new series titles for likely renames.
+    """
+    if not title:
+        return ''
+    lowered = title.lower()
+    lowered = re.sub(r'\(\d{4}\)', ' ', lowered)
+    lowered = re.sub(r'[^a-z0-9\s]', ' ', lowered)
+    stopwords = {
+        'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'at', 'from',
+        'with', 'by', 'no', 'san', 'chan', 'kun', 'sama',
+    }
+    tokens = [t for t in lowered.split() if t and t not in stopwords]
+    return ' '.join(sorted(set(tokens)))
+
+
+def _match_vanished_to_new(vanished_entries, new_dict):
+    """Pair each vanished series with the best matching new series, if any.
+
+    Args:
+        vanished_entries: list of (title, reason, url) tuples.
+        new_dict: dict title -> series data for newly scraped series.
+
+    Returns:
+        list of (vanished_title, vanished_url, new_title, new_url, reason)
+        tuples. `reason` is one of 'exact', 'strong', 'weak', or None.
+    """
+    new_titles = list(new_dict.keys())
+    new_keys = [_normalize_match_key(t) for t in new_titles]
+    used_new = set()
+    matched = []
+
+    for v_title, _reason, v_url in vanished_entries:
+        v_key = _normalize_match_key(v_title)
+        best = None
+        best_score = 0.0
+        best_idx = -1
+
+        for idx, n_title in enumerate(new_titles):
+            if idx in used_new:
+                continue
+            n_key = new_keys[idx]
+            if not v_key or not n_key:
+                continue
+
+            if v_key == n_key:
+                best = n_title
+                best_score = 1.0
+                best_idx = idx
+                break
+
+            v_tokens = set(v_key.split())
+            n_tokens = set(n_key.split())
+            if v_tokens and n_tokens:
+                overlap = len(v_tokens & n_tokens) / max(
+                    len(v_tokens), len(n_tokens)
+                )
+                if overlap > best_score and overlap >= 0.4:
+                    best = n_title
+                    best_score = overlap
+                    best_idx = idx
+
+            seq = difflib.SequenceMatcher(None, v_key, n_key).ratio()
+            if seq > best_score and seq >= 0.5:
+                best = n_title
+                best_score = seq
+                best_idx = idx
+
+        if best is not None:
+            used_new.add(best_idx)
+            n_data = new_dict[best]
+            n_url = n_data.get('url', n_data.get('link', ''))
+            if best_score >= 0.95:
+                reason = 'exact'
+            elif best_score >= 0.7:
+                reason = 'strong'
+            else:
+                reason = 'weak'
+            matched.append((v_title, v_url, best, n_url, reason))
+        else:
+            matched.append((v_title, v_url, None, None, None))
+
+    for idx, n_title in enumerate(new_titles):
+        if idx not in used_new:
+            n_data = new_dict[n_title]
+            n_url = n_data.get('url', n_data.get('link', ''))
+            matched.append((None, None, n_title, n_url, 'extra'))
+
+    return matched
+
+
+def _format_vanished_new_table(matched):
+    """Return (table_lines, extra_lines) for the vanished/new comparison."""
+    if not matched:
+        return [], []
+
+    paired_rows = []
+    extra_rows = []
+    for v_title, v_url, n_title, n_url, reason in matched:
+        if reason == 'extra' or not v_title:
+            extra_rows.append((n_title or '', n_url or ''))
+            continue
+        paired_rows.append((v_title or '', v_url or '',
+                           n_title or '', n_url or ''))
+
+    if not paired_rows:
+        return [], _format_extra_new_series_lines(extra_rows)
+
+    arrow = '  →  '
+    term_w = max(shutil.get_terminal_size().columns, 80)
+    usable = max(term_w - len(arrow) - 2, 40)  # 2 leading spaces
+    max_col = usable // 2
+    left_w = min(max(
+        max((max(len(t), len(u)) for t, u, _, _ in paired_rows), default=0),
+        len('Vanished (old)'),
+    ), max_col)
+    right_w = min(max(
+        max((max(len(t), len(u)) for _, _, t, u in paired_rows), default=0),
+        len('New counterpart'),
+    ), max_col)
+
+    def _trunc(text, width):
+        if len(text) <= width:
+            return text
+        return text[:width - 1] + '…'
+
+    sep = '─' * (left_w + right_w + len(arrow))
+    lines = [sep]
+    lines.append(
+        f"  {'Vanished (old)':<{left_w}}{arrow}{'New counterpart':<{right_w}}"
+    )
+    lines.append(
+        f"  {'-' * left_w}{arrow}{'-' * right_w}"
+    )
+    for lt, lu, rt, ru in paired_rows:
+        lines.append(
+            f"  {_trunc(lt, left_w):<{left_w}}{arrow}{_trunc(rt, right_w):<{right_w}}")
+        if lu or ru:
+            if lu:
+                lines.append(
+                    f"  {_trunc(lu, left_w):<{left_w}}{arrow}{_trunc(ru, right_w):<{right_w}}")
+            else:
+                lines.append(
+                    f"  {'':<{left_w}}{arrow}{_trunc(ru, right_w):<{right_w}}")
+    lines.append(sep)
+    return lines, _format_extra_new_series_lines(extra_rows)
+
+
+def _format_extra_new_series_lines(extra_rows):
+    """Return printable lines for new series with no vanished counterpart."""
+    if not extra_rows:
+        return []
+    lines = []
+    lines.append(
+        f"\n  + {len(extra_rows)} new series not linked to vanished entries:"
+    )
+    for title, url in extra_rows:
+        if url:
+            lines.append(f"    • {title}")
+            lines.append(f"      new: {url}")
+        else:
+            lines.append(f"    • {title}")
+    return lines
 
 
 def _save_vanished_series_report(vanished_entries, index_file):
@@ -1679,9 +1823,6 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_fil
         print(
             f"  [INFO] {len(vanished)} previously indexed series NOT found in current scrape:")
         print(separator)
-        for i, (title, reason, url) in enumerate(vanished, 1):
-            print(f"  {i}. {title}  ({reason})  [{url}]")
-        print(separator)
 
         # Save mismatched entries to JSON for later review
         _save_vanished_series_report(vanished, index_file)
@@ -1699,25 +1840,30 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope, index_fil
                 incoming_new = [
                     t for t in new_dict if t and t not in old_titles]
                 if incoming_new:
-                    print(f"\n{separator}")
+                    matched = _match_vanished_to_new(vanished, new_dict)
+                    table_lines, extra_lines = _format_vanished_new_table(
+                        matched)
+                    for line in table_lines:
+                        print(line)
+                    for line in extra_lines:
+                        print(line)
                     print(
-                        f"  [INFO] {len(incoming_new)} NEW series in this scrape"
-                        " (may be renames of the above):"
+                        f"\n  Compare {len(vanished)} vanished series with "
+                        "their possible new counterparts above. "
+                        "Use the interactive prompts below to delete old entries."
                     )
+                else:
+                    for i, (title, reason, url) in enumerate(vanished, 1):
+                        print(f"  {i}. {title}  ({reason})")
+                        print(f"      old: {url}")
                     print(separator)
-                    for title in incoming_new:
-                        series = new_dict[title]
-                        watched = series.get('watched_episodes', 0)
-                        total_ep = series.get('total_episodes', 0)
-                        url = series.get('url', series.get('link', ''))
-                        print(
-                            f"  + {title}: {watched}/{total_ep} watched"
-                            + (f"  ({url})" if url else "")
-                        )
-                    print(separator)
+            else:
+                for i, (title, reason, url) in enumerate(vanished, 1):
+                    print(f"  {i}. {title}  ({reason})")
+                    print(f"      old: {url}")
+                print(separator)
 
             to_delete = _prompt_vanished_deletions(vanished)
-
             if to_delete and index_file:
                 removed = remove_series_from_index(index_file, to_delete)
                 print(f"  ✓ Removed {removed} series from index.")

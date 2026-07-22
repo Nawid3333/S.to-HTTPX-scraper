@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import signal
 import threading
 import time
 from urllib.parse import urlparse
@@ -124,6 +125,93 @@ def _is_logged_in(html: str) -> bool:
     return soup.select_one("form[action='/logout']") is not None
 
 
+# ── Language detection ────────────────────────────────────────────────────
+
+# Language flag identifier → normalized language code
+_LANGUAGE_FLAG_MAP = {
+    # German variants
+    "german": "german_dub",
+    "deutsch": "german_dub",
+    "de": "german_dub",
+    "ger": "german_dub",
+    "deu": "german_dub",
+    # English variants
+    "english": "english_dub",
+    "englisch": "english_dub",
+    "en": "english_dub",
+    "eng": "english_dub",
+    "us": "english_dub",
+    "uk": "english_dub",
+    # Japanese variants
+    "japanese": "japanese_sub",
+    "japanisch": "japanese_sub",
+    "ja": "japanese_sub",
+    "jap": "japanese_sub",
+    # Common subtitled combinations
+    "japanese-german": "german_sub",
+    "japanese-english": "english_sub",
+    "sub-german": "german_sub",
+    "sub-english": "english_sub",
+    "sub-de": "german_sub",
+    "sub-en": "english_sub",
+    "ger-sub": "german_sub",
+    "eng-sub": "english_sub",
+}
+
+
+def _extract_languages_from_row(row) -> list[str]:
+    """Return normalized language codes from SVG/IMG flag icons in a row."""
+    languages: list[str] = []
+    seen: set[str] = set()
+
+    lang_cell = row.select_one("td.episode-language-cell")
+    if not lang_cell:
+        # Fallback: any cell that contains flag icons
+        for cell in row.find_all("td"):
+            if cell.select_one("svg[class*='flag'], use[href*='flag']"):
+                lang_cell = cell
+                break
+
+    if not lang_cell:
+        return languages
+
+    # SVG <use href="#icon-flag-german"> style
+    for use in lang_cell.find_all("use"):
+        href = use.get("href") or use.get("xlink:href") or ""
+        m = re.search(r"icon-flag-([a-z0-9\-]+)", href, re.IGNORECASE)
+        if m:
+            code = _LANGUAGE_FLAG_MAP.get(m.group(1).lower())
+            if code and code not in seen:
+                seen.add(code)
+                languages.append(code)
+
+    # SVG class style: svg-flag-german
+    for svg in lang_cell.find_all("svg"):
+        classes = " ".join(svg.get("class") or [])
+        for token in re.findall(r"flag-([a-z0-9\-]+)", classes, re.IGNORECASE):
+            code = _LANGUAGE_FLAG_MAP.get(token.lower())
+            if code and code not in seen:
+                seen.add(code)
+                languages.append(code)
+
+    # IMG src style: german.svg or flag-german.png
+    for img in lang_cell.find_all("img"):
+        src = img.get("src", "")
+        title_attr = img.get("title", "")
+        for token in re.findall(r"([a-z0-9\-]+)\.(?:svg|png|jpg)", src, re.IGNORECASE):
+            code = _LANGUAGE_FLAG_MAP.get(token.lower())
+            if code and code not in seen:
+                seen.add(code)
+                languages.append(code)
+        if title_attr and not languages:
+            code = _LANGUAGE_FLAG_MAP.get(title_attr.lower())
+            if code and code not in seen:
+                seen.add(code)
+                languages.append(code)
+
+    return languages
+
+
 # ── HTML helpers ────────────────────────────────────────────────────────────
 
 def _parse_episodes(html: str) -> list[dict]:
@@ -134,6 +222,7 @@ def _parse_episodes(html: str) -> list[dict]:
       - Number: th.episode-number-cell
       - Title (DE): .episode-title-ger
       - Title (EN): .episode-title-eng
+      - Languages: td.episode-language-cell SVG flags
       - Watched: 'seen' class on the row
     Falls back to generic selectors if primary ones fail.
     """
@@ -193,6 +282,9 @@ def _parse_episodes(html: str) -> list[dict]:
                 title = title_tag.get_text(
                     strip=True) if title_tag else cols[1].get_text(strip=True)
 
+        # Language flags
+        languages = _extract_languages_from_row(row)
+
         # Check if watched — s.to uses 'seen' class, bs.to uses 'watched' class
         row_classes = row.get("class") or []
         watched = "seen" in row_classes or "watched" in row_classes
@@ -204,6 +296,8 @@ def _parse_episodes(html: str) -> list[dict]:
             ep["title_eng"] = title_eng
         if title and not title_ger and not title_eng:
             ep["title"] = title
+        if languages:
+            ep["languages"] = languages
         episodes.append(ep)
     return episodes
 
@@ -243,22 +337,24 @@ def _check_error_page(html: str) -> str | None:
 def _extract_title(html: str) -> str | None:
     """Extract series title from the page.
 
-    Tries h1.fw-bold first (s.to), then h2 (bs.to fallback).
-    Strips trailing 'Staffel N' suffixes.
+    Tries site-specific heading(s) first, then falls back to generic headings.
+    Strips trailing 'Staffel N' suffixes from fallback headings.
     """
     soup = BeautifulSoup(html, "html.parser")
-    # s.to: h1.fw-bold
-    h1 = soup.select_one("h1.fw-bold")
-    if h1:
-        text = h1.get_text(strip=True)
-        if text:
-            return text
-    # bs.to fallback: h2
-    h2 = soup.find("h2")
-    if h2:
-        text = h2.get_text(strip=True)
-        text = re.sub(r'\s*Staffel\s*\d+.*$', '', text)
-        return text or None
+    # s.to preferred heading
+    for selector in ("h1.fw-bold",):
+        el = soup.select_one(selector)
+        if el:
+            text = el.get_text(strip=True)
+            if text:
+                return text
+    # Fallback headings
+    for tag in ("h2", "h1"):
+        el = soup.find(tag)
+        if el:
+            text = el.get_text(strip=True)
+            text = re.sub(r'\s*Staffel\s*\d+.*$', '', text)
+            return text or None
     return None
 
 
@@ -320,6 +416,29 @@ def _extract_alt_titles(data_search: str, main_title: str) -> list[str]:
         else:
             alt_titles.append(part)
     return alt_titles
+
+
+def _extract_description_alt_title(html: str, main_title: str) -> list[str]:
+    """Extract an alternative title from the series description block.
+
+    s.to/serienstream.to puts the original English title at the start of the
+    synopsis inside square brackets, e.g.:
+        [My Life with the Walter Boys] Jackie Howards Leben ...
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    desc_el = soup.select_one("span.description-text")
+    if not desc_el:
+        return []
+    text = desc_el.get_text(strip=True)
+    if not text:
+        return []
+    match = re.match(r"\[(.+?)\]\s*", text)
+    if not match:
+        return []
+    alt = match.group(1).strip()
+    if not alt or alt.lower() == main_title.lower().strip():
+        return []
+    return [alt]
 
 
 # ── Exception ───────────────────────────────────────────────────────────────
@@ -715,6 +834,14 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         except OSError:
             pass
 
+    def _create_pause_file(self):
+        """Create the pause file so workers raise ScrapingPaused."""
+        try:
+            with open(self.pause_file, 'w', encoding='utf-8') as f:
+                f.write('PAUSE')
+        except OSError:
+            pass
+
     async def _try_login_on_site(self, site_url) -> httpx.AsyncClient:
         client = httpx.AsyncClient(
             headers={"User-Agent": UA},
@@ -1039,6 +1166,13 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         # Detect subscription/watchlist status from the main series page
         subscribed, watchlist = _detect_subscription_status(html)
 
+        # Merge alt titles from the series list with the detail-page bracketed
+        # alt title in the description block.
+        alt_titles = list(dict.fromkeys(
+            (info.get("alt_titles") or [])
+            + _extract_description_alt_title(html, title)
+        ))
+
         scrape_url = info.get("scrape_url", info["url"])
         if scrape_url.startswith("http://") or scrape_url.startswith("https://"):
             parsed_scrape = urlparse(scrape_url)
@@ -1085,18 +1219,13 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
             watched_count = sum(1 for ep in episodes if ep["watched"])
             total_count = len(episodes)
-            primary_season_url = _build_full_url(
-                SITE_URL, f"/serie/{slug}/staffel-{label}")
             season_entry = {
                 "season": label,
-                "url": primary_season_url,
+                "url": season_url,
                 "episodes": episodes,
                 "watched_episodes": watched_count,
                 "total_episodes": total_count,
-                "recent_url": season_url,
             }
-            if season_url != primary_season_url:
-                season_entry["fallback_url"] = season_url
             if ep0_exists and is_ignored:
                 season_entry["ignored_episode_0"] = True
             seasons_data.append(season_entry)
@@ -1106,7 +1235,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         result = {
             "title": title,
             "link": info["link"],
-            "url": info["url"],
+            "url": scrape_url,
             "total_seasons": len(seasons_data),
             "total_episodes": total_eps,
             "watched_episodes": total_watched,
@@ -1115,11 +1244,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             "watchlist": watchlist,
             "seasons": seasons_data,
         }
-        result["recent_url"] = scrape_url
-        if scrape_url != info["url"]:
-            result["fallback_url"] = scrape_url
-        if info.get("alt_titles"):
-            result["alt_titles"] = info["alt_titles"]
+        if alt_titles:
+            result["alt_titles"] = alt_titles
         if has_episode_zero:
             result["_has_episode_zero"] = True
         if stale_ignored:
@@ -1187,7 +1313,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                         "url": info["url"],
                         "title": result.get("title", info.get("title", "")),
                         "link": info.get("link", ""),
-                        "reason": "zero_episodes",
+                        "reason": "empty_placeholder",
                     })
                 else:
                     results.append(result)
@@ -1669,6 +1795,23 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
         # Clear any stale pause file from a previous run
         self._clear_pause_file()
+
+        # Register graceful Ctrl+C pause: signal handler creates the
+        # pause file so workers finish their current series and then raise
+        # ScrapingPaused at the next checkpoint.
+        def _signal_handler(signum, _frame):
+            logger.info(
+                "Received signal %d — graceful pause requested", signum)
+            print("\n⚠ Pause requested (Ctrl+C). Finishing current series...")
+            self._create_pause_file()
+
+        try:
+            signal.signal(signal.SIGINT, _signal_handler)
+            if hasattr(signal, 'SIGTERM'):
+                signal.signal(signal.SIGTERM, _signal_handler)
+        except ValueError:
+            # Not the main thread or signal not supported; ignore.
+            pass
 
         try:
             if resume_only:

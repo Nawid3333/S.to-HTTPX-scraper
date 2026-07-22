@@ -31,7 +31,7 @@ from config.config import (  # noqa: E402  # pylint: disable=import-error,no-nam
     DEFAULT_BATCH_FILE,
 )
 
-from src.scraper import SToScraper  # noqa: E402  # pylint: disable=wrong-import-position
+from src.scraper import SToScraper, ScrapingPaused  # noqa: E402  # pylint: disable=wrong-import-position
 from src.index_manager import (  # noqa: E402  # pylint: disable=wrong-import-position
     IndexManager, confirm_and_save_changes, show_vanished_series,
     _extract_slug_from_field, get_episode_counts,
@@ -202,8 +202,7 @@ def show_menu():  # pylint: disable=too-many-branches
     print("  5. Single link / batch add")
     print("  6. Scrape subscribed/watchlist series")
     print("  7. Retry failed scrapes")
-    print("  8. Pause current scraping (in another terminal)")
-    print("  9. Exit\n")
+    print("  8. Exit\n")
 
 
 def _check_checkpoint(expected_mode=None):
@@ -261,24 +260,61 @@ def _format_host_rows(hosts):
     if not hosts:
         return []
 
-    host_w = max(len(label) for label, *_ in hosts)
-    idx_counts = [str(idx_count) for _, _, _, idx_count,
-                  *_ in hosts if idx_count is not None]
-    idx_w = max([len(c) for c in idx_counts] + [5])
-    cmp_txts = [str(compare_txt) for _, _, _, _,
-                compare_txt in hosts if compare_txt is not None]
-    cmp_w = max([len(c) for c in cmp_txts] + [7])
+    term_w = max(shutil.get_terminal_size().columns, 80)
+    arrow_gap = '  '
+
+    labels = ['Host', 'Status', 'Series', 'Index', 'Compare']
+    cols = {
+        'host': max([len(str(label)) for label, *_ in hosts] + [len(labels[0])]),
+        'status': max([len('OK' if status else 'FAILED') for _, status, *_ in hosts] + [len(labels[1])]),
+        'series': max([len(f"{count:,}") if count is not None else 1 for _, _, count, *_ in hosts] + [len(labels[2])]),
+        'index': max([len(f"{idx_count:,}") if idx_count is not None else 1 for _, _, _, idx_count, *_ in hosts] + [len(labels[3])]),
+        'compare': max([len(str(compare_txt)) if compare_txt is not None else 1 for *_, compare_txt in hosts] + [len(labels[4])]),
+    }
+
+    total = sum(cols.values()) + len(labels) * len(arrow_gap)
+    if total > term_w:
+        excess = total - term_w
+        trimmable = cols['host'] - \
+            len(labels[0]) + cols['compare'] - len(labels[4])
+        if trimmable > 0:
+            factor = min(excess / trimmable, 1.0)
+            cols['host'] = max(len(labels[0]), int(
+                cols['host'] - (cols['host'] - len(labels[0])) * factor))
+            cols['compare'] = max(len(labels[4]), int(
+                cols['compare'] - (cols['compare'] - len(labels[4])) * factor))
+
+    def _trunc(text, width):
+        text = str(text)
+        return text if len(text) <= width else text[:width - 1] + '…'
+
+    sep_parts = ['─' * cols['host']] + ['─' * cols[key]
+                                        for key in ['status', 'series', 'index', 'compare']]
+
     lines = [
-        f"  {'Host':<{host_w}}  Status    Series      {'Index':<{idx_w}}  {'Compare':<{cmp_w}}",
-        f"  {'-' * host_w}  ------    ------      {'-' * idx_w}  {'-' * cmp_w}",
+        arrow_gap + '  '.join([
+            f"{_trunc(labels[0], cols['host']):<{cols['host']}}",
+            f"{labels[1]:<{cols['status']}}",
+            f"{labels[2]:<{cols['series']}}",
+            f"{labels[3]:<{cols['index']}}",
+            f"{labels[4]:<{cols['compare']}}",
+        ]),
+        arrow_gap + '  '.join(sep_parts),
     ]
+
     for label, status, count, idx_count, compare_txt in hosts:
-        status_txt = "OK" if status else "FAILED"
-        count_txt = f"{count:,}" if count is not None else "-"
-        idx_txt = f"{idx_count:,}" if idx_count is not None else "-"
-        cmp_txt = compare_txt if compare_txt is not None else "-"
+        status_txt = 'OK' if status else 'FAILED'
+        count_txt = f"{count:,}" if count is not None else '-'
+        idx_txt = f"{idx_count:,}" if idx_count is not None else '-'
+        cmp_txt = compare_txt if compare_txt is not None else '-'
         lines.append(
-            f"  {label:<{host_w}}  {status_txt:<8}  {count_txt:<10}  {idx_txt:<{idx_w}}  {cmp_txt}"
+            arrow_gap + '  '.join([
+                f"{_trunc(label, cols['host']):<{cols['host']}}",
+                f"{status_txt:<{cols['status']}}",
+                f"{count_txt:<{cols['series']}}",
+                f"{idx_txt:<{cols['index']}}",
+                f"{_trunc(cmp_txt, cols['compare']):<{cols['compare']}}",
+            ])
         )
     return lines
 
@@ -630,6 +666,14 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg,
         print(f"\n⏱ Scrape duration: {t_elapsed / 60:.1f}m ({t_elapsed:.1f}s)")
 
         return scraper
+    except ScrapingPaused:
+        # Scraper has already saved the checkpoint when paused.
+        print("\n⚠ Scraping was paused — checkpoint preserved for resume.")
+        logger.info("%s paused — returning to menu", description)
+        if scraper is not None and scraper.failed_links:
+            print(f"\n⚠ {len(scraper.failed_links)} series failed.")
+            print("→ Use option 7 (Retry failed series) to rescrape these later.")
+        return scraper
     except (KeyboardInterrupt, SystemExit):
         print("\n⚠ Scraping interrupted by Ctrl+C")
         if 'scraper' in locals() and scraper.series_data:
@@ -876,13 +920,17 @@ def _show_ongoing_and_export(report, index_manager):
     if ongoing_count == 0:
         return
 
-    print(f"\n{'=' * 70}")
-    print(f"ONGOING SERIES ({ongoing_count}):")
+    print("\n  ONGOING SERIES")
     ongoing_titles = report['categories']['ongoing']['titles']
-    for title in ongoing_titles[:10]:
-        print(f"  - {title}")
+    idx_w = len(str(min(ongoing_count, 10)))
+    title_w = max((len(t) for t in ongoing_titles[:10]), default=0)
+    print(f"    {'#':<{idx_w}}  {'Title':<{title_w}}")
+    print(f"    {'─' * idx_w}  {'─' * title_w}")
+    for i, title in enumerate(ongoing_titles[:10], 1):
+        row = f"    {i:<{idx_w}}  {title:<{title_w}}"
+        print(row.rstrip())
     if ongoing_count > 10:
-        print(f"  ... and {ongoing_count - 10} more\n")
+        print(f"    ... and {ongoing_count - 10} more")
 
     export = input(
         f"\nExport {ongoing_count} ongoing series URLs to series_urls.txt? (y/n): ").strip().lower()
@@ -919,54 +967,76 @@ def _print_report_summary(report, report_file, filter_name=None):
     not_started_sub_wl_count = report['categories']['not_started_subscribed_watchlist']['count']
     waiting_count = report['categories']['waiting_for_new_episodes']['count']
 
-    header = f"REPORT SUMMARY ({filter_name.upper().replace('_', ' ')}):" if filter_name else "REPORT SUMMARY:"
-    print("\n" + "-"*70)
-    print(header)
-    print("-"*70)
-    print(f"  Total series:        {stats['total_series']}")
-    print(
-        f"  Completed (100%):    {stats.get('completed_count', stats['watched'])}")
-    print(
-        f"  Ongoing (started):   {stats.get('ongoing_count', ongoing_count)}")
+    header = f"REPORT SUMMARY ({filter_name.upper().replace('_', ' ')})" if filter_name else "REPORT SUMMARY"
+    term_w = max(shutil.get_terminal_size().columns, 80)
+
+    metrics = [
+        ("Total series", str(stats['total_series'])),
+        ("Completed (100%)", str(
+            stats.get('completed_count', stats['watched']))),
+        ("Ongoing (started)", str(stats.get('ongoing_count', ongoing_count))),
+    ]
     if waiting_count > 0:
-        print(f"  Waiting for new eps: {waiting_count}")
-    print(
-        f"  Not started (0%):    {stats.get('not_started_count', not_started_count)}")
-    if not_started_sub_wl_count > 0:
-        print(f"  Not started (Sub/WL):{not_started_sub_wl_count}")
-    print(f"  Total episodes:      {stats['total_episodes']}")
-    print(f"  Watched episodes:    {stats['watched_episodes']}")
-    print(f"  Unwatched episodes:  {stats.get('unwatched_episodes', 0)}")
-    print(
-        f"  Avg episodes/series: {stats.get('average_episodes_per_series', 0)}")
-    print(f"  Average completion:  {stats['average_completion']:.1f}%")
-    print(f"  Subscribed:          {stats.get('subscribed_count', 0)}")
-    print(f"  Watchlist:           {stats.get('watchlist_count', 0)}")
-    print(
-        f"  Both (Sub+WL):       {stats.get('both_subscribed_and_watchlist', 0)}")
+        metrics.append(("Waiting for new eps", str(waiting_count)))
+    metrics.extend([
+        ("Not started (0%)", str(stats.get('not_started_count', not_started_count))),
+        ("Not started (Sub/WL)", str(not_started_sub_wl_count)),
+        ("Total episodes", str(stats['total_episodes'])),
+        ("Watched episodes", str(stats['watched_episodes'])),
+        ("Unwatched episodes", str(stats.get('unwatched_episodes', 0))),
+        ("Avg episodes/series", str(stats.get('average_episodes_per_series', 0))),
+        ("Average completion", f"{stats['average_completion']:.1f}%"),
+        ("Subscribed", str(stats.get('subscribed_count', 0))),
+        ("Watchlist", str(stats.get('watchlist_count', 0))),
+        ("Both (Sub+WL)", str(stats.get('both_subscribed_and_watchlist', 0))),
+    ])
+
+    label_w = min(max((len(m[0])
+                  for m in metrics), default=0), term_w // 2 - 4)
+    value_w = min(max((len(m[1])
+                  for m in metrics), default=0), term_w // 2 - 4)
+    table_w = label_w + value_w + 3
+    sep = '─' * table_w
+
+    def _trunc(text, width):
+        return text if len(text) <= width else text[:width - 1] + '…'
+
+    print("\n" + sep)
+    print(f"  {header}")
+    print("  " + '─' * (table_w - 2))
+    for label, value in metrics:
+        line = f"  {_trunc(label, label_w):<{label_w}}  {_trunc(value, value_w):<{value_w}}"
+        print(line.rstrip())
+    print(sep)
 
     dist = stats.get('completion_distribution', {})
     if dist:
-        parts = [f"{k}: {v}" for k, v in dist.items()]
-        print("\n  Completion Distribution:")
-        print(f"    {'  |  '.join(parts)}")
+        print("\n  COMPLETION BREAKDOWN")
+        bucket_w = max((len(k) for k in dist), default=0)
+        count_w = max((len(str(v)) for v in dist.values()), default=0)
+        print(f"    {'Bucket':<{bucket_w}}  {'Count':<{count_w}}")
+        print(f"    {'─' * bucket_w}  {'─' * count_w}")
+        for bucket, count in dist.items():
+            row = f"    {bucket:<{bucket_w}}  {str(count):<{count_w}}"
+            print(row.rstrip())
 
     most = stats.get('most_completed_series', [])
     if most:
-        print(f"\n  Most Completed Ongoing (top {len(most)}):")
+        print(f"\n  MOST COMPLETED ONGOING")
         for i, s in enumerate(most, 1):
             print(
                 f"    {i}. {s['title']} — {s['completion']:.1f}% ({s['progress']})")
 
     least = stats.get('least_completed_series', [])
     if least:
-        print(f"  Least Completed Ongoing (bottom {len(least)}):")
+        print(f"\n  LEAST COMPLETED ONGOING")
         for i, s in enumerate(least, 1):
             print(
                 f"    {i}. {s['title']} — {s['completion']:.1f}% ({s['progress']})")
 
-    print(f"\n  Saved to:            {report_file}")
-    print("-"*70 + "\n")
+    print("\n  SAVED TO")
+    print(f"    {report_file}")
+    print(sep + "\n")
 
 
 def generate_report():
@@ -1139,20 +1209,6 @@ def retry_failed_series():
     )
 
 
-def pause_scraping():
-    """Create a pause file to signal workers to pause scraping"""
-    pause_file = os.path.join(DATA_DIR, '.pause_scraping')
-    try:
-        with open(pause_file, 'w', encoding='utf-8') as f:
-            f.write('PAUSE')
-        print(f"\n✓ Pause file created: {pause_file}")
-        print("Workers will pause at next checkpoint.\n")
-        logger.info("Pause file created: %s", pause_file)
-    except Exception as e:
-        print(f"\n✗ Failed to create pause file: {str(e)}")
-        logger.error("Failed to create pause file: %s", e)
-
-
 def main():
     """Main application loop"""
     idx_mgr = IndexManager(SERIES_INDEX_FILE)
@@ -1177,10 +1233,10 @@ def main():
 
     while True:
         show_menu()
-        choice = input("Enter your choice (1-9): ").strip()
+        choice = input("Enter your choice (1-8): ").strip()
 
-        if not choice.isdigit() or not 1 <= int(choice) <= 9:
-            print("✗ Invalid choice. Please enter a number between 1 and 9.")
+        if not choice.isdigit() or not 1 <= int(choice) <= 8:
+            print("✗ Invalid choice. Please enter a number between 1 and 8.")
             continue
 
         if choice in ['1', '2', '3', '5', '6', '7']:
@@ -1203,8 +1259,6 @@ def main():
         elif choice == '7':
             retry_failed_series()
         elif choice == '8':
-            pause_scraping()
-        elif choice == '9':
             print("\n✓ Goodbye!\n")
             break
 
