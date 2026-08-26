@@ -104,9 +104,9 @@ python main.py
 | 3   | **Scrape unwatched series**     | Skips fully watched series; focuses on ongoing/partial.                    |
 | 4   | **Generate report**             | Full or filtered report (subscribed / watchlist / both). Saves to JSON.    |
 | 5   | **Single link / batch add**     | Add a single series by URL, or batch-import from a text file.              |
-| 6   | **Scrape subscribed/watchlist** | Fetch series from your s.to subscription or watchlist pages.               |
-| 7   | **Retry failed scrapes**        | Bulk retry all series that failed in previous runs.                        |
-| 8   | **Exit**                        | Clean exit.                                                                |
+| 6   | **Retry failed scrapes**        | Bulk retry all series that failed in previous runs.                        |
+| 7   | **Scrape subscribed/watchlist** | Fetch series from your s.to subscription or watchlist pages.               |
+| 0   | **Exit**                        | Clean exit.                                                                |
 
 > **Pausing scraping:** there is no dedicated menu option. To gracefully pause workers, create a `.pause_scraping` file in the `data/` directory (see [Pause/resume](#pauseresume) below).
 

@@ -64,6 +64,12 @@ def make_soup(html: str) -> BeautifulSoup:
 # series and must never be retried; these are the site saying "not now".
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_ATTEMPTS = 3
+# How many times one run may recover from a mid-run session expiry.
+_MAX_RELOGINS = 3
+# A catalogue this much smaller than the local index is treated as suspect
+# and reported to the user before anything is called vanished.
+_CATALOGUE_WARN_RATIO = 0.95
+_CATALOGUE_MIN_INDEX = 20
 _BACKOFF_BASE = 0.5
 
 
@@ -313,8 +319,15 @@ def _score_rename_match(v_title: str, v_url: str, n_title: str, n_url: str) -> f
     return best
 
 
-def _find_vanished_renames(vanished_entries, new_entries, threshold: float = 0.35) -> set[str]:
-    """Return set of new entry titles that are renames of vanished entries."""
+def _find_vanished_renames(vanished_entries, new_entries, threshold: float = 0.75) -> set[str]:
+    """Return set of new entry titles that look like renames of vanished ones.
+
+    Advisory only -- the caller reports these, it never drops a series from
+    a scrape on the strength of a guess. The threshold sits high because the
+    scoring is fuzzy: at 0.35 "One Piece"/"One Punch Man" scored 0.55,
+    "Death Note"/"Deadman Wonderland" 0.43 and "Bleach"/"Beelzebub" 0.40,
+    so unrelated shows were being announced as renames of each other.
+    """
     renames: set[str] = set()
     used_new: set[int] = set()
     new_list = list(new_entries)
@@ -836,6 +849,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         self._checkpoint_mode: str | None = None
         self._use_parallel: bool = True
         self._lock = threading.Lock()
+        self._relogin_count = 0
         self._last_pause_check = 0.0
         self._pause_cached = False
         self.paused = False
@@ -1165,23 +1179,33 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                url = item.get("url", "") or item.get("link", "")
-                slug = self.get_series_slug_from_url(url)
+                # Match the catalogue side, which reads "link": comparing a
+                # url-derived slug against link-derived ones would disagree the
+                # moment the two fields differ, and show_vanished_series also
+                # prefers "link". Both are kept as fallbacks so an entry
+                # carrying only one of them still resolves.
+                slug_source = item.get("link", "") or item.get("url", "")
+                slug = self.get_series_slug_from_url(slug_source)
                 if slug and slug != "unknown" and slug not in catalog_slugs:
-                    entries.append((item.get("title", slug), url))
+                    entries.append((item.get("title", slug), item.get("url", "") or slug_source))
         except Exception:
             pass
         return entries
 
     def _filter_new_entries(self, new_entries, all_series):
-        """Return (truly_new, rename_titles) separating renames from new entries."""
+        """Return (all_entries, rename_titles) -- renames are flagged, never skipped.
+
+        A likely rename is worth telling the user about, but acting on it means
+        a genuinely new series is never scraped and so never enters the index.
+        The rename score is a fuzzy guess; the index is a mirror of the site.
+        Report the suspicion, scrape everything, and let the user decide.
+        """
         vanished_entries = self._vanished_index_entries(all_series)
         rename_titles = _find_vanished_renames(
             [(t, u) for t, u in vanished_entries],
             new_entries,
         )
-        truly_new = [s for s in new_entries if s.get("title") not in rename_titles]
-        return truly_new, rename_titles
+        return list(new_entries), rename_titles
 
     # ── Ignored seasons management ──────────────────────────────────────────
 
@@ -1538,6 +1562,50 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     # ── Index helpers (for new_only mode) ───────────────────────────────────
 
+    def _confirm_catalogue_size(self, all_series) -> bool:
+        """Warn when a fetched catalogue looks too short to be genuine, and ask.
+
+        A truncated or degraded catalogue response still parses cleanly, so a
+        short list is indistinguishable from a site that really did lose
+        series -- except by size. Every indexed entry missing from it is later
+        reported as vanished and offered for deletion, so a bad fetch can put
+        thousands of good entries in front of a delete-all prompt.
+
+        This only reports and asks; the user decides whether to go on. It is
+        deliberately not an automatic abort: a site genuinely shrinking is a
+        real thing, and only the user can tell the two apart.
+        """
+        try:
+            indexed = len(self.load_existing_slugs())
+        except Exception:
+            return True
+        fetched = len(all_series)
+        if indexed < _CATALOGUE_MIN_INDEX or fetched >= indexed * _CATALOGUE_WARN_RATIO:
+            return True
+
+        missing = indexed - fetched
+        pct = (fetched / indexed * 100) if indexed else 0.0
+        print("\n" + "!" * 70)
+        print("  [WARN] The fetched catalogue looks unusually small.")
+        print(f"    indexed series : {indexed:,}")
+        print(f"    fetched now    : {fetched:,}  ({pct:.1f}% of the index)")
+        print(f"    would be flagged as vanished: up to {missing:,}")
+        print("  A truncated or partial response looks exactly like this.")
+        print("  Continuing is fine if the site really did shrink.")
+        print("!" * 70)
+        logger.warning(
+            "Catalogue smaller than index: fetched %d vs indexed %d (%.1f%%)",
+            fetched,
+            indexed,
+            pct,
+        )
+        answer = input("\nContinue with this scrape anyway? (y/n): ").strip().lower()
+        if answer != "y":
+            print("  -> Scrape cancelled. The index was not touched.")
+            logger.info("User cancelled scrape after short-catalogue warning.")
+            return False
+        return True
+
     def load_existing_slugs(self) -> set[str]:
         existing = set()
         try:
@@ -1558,7 +1626,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     async def _get_all_series(self, client: httpx.AsyncClient) -> list[dict]:
         """Fetch the full series catalogue from the active site."""
-        resp = await client.get(_build_full_url(self.site_url, SERIES_LIST_PATH))
+        resp = await self._get(client, _build_full_url(self.site_url, SERIES_LIST_PATH))
         soup = make_soup(resp.text)
         if not _is_logged_in(soup):
             raise RuntimeError("Not logged in — cannot fetch series catalogue")
@@ -1753,7 +1821,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         slug = self.get_series_slug_from_url(info["url"])
 
         try:
-            resp = await client.get(url, follow_redirects=True)
+            resp = await self._get(client, url)
         except httpx.HTTPError as e:
             return self._error_result(info, str(e))
 
@@ -1770,8 +1838,18 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
         # Verify still logged in
         if not _is_logged_in(soup):
-            logger.error("Session expired while scraping %s", url)
-            return self._error_result(info, "session expired — not logged in")
+            # One shared session serves the whole run, so an expiry here would
+            # otherwise fail every remaining series. Re-login once and retry
+            # this page; only give up if the second look is still logged out.
+            if await self._relogin_shared_client(client):
+                try:
+                    resp = await self._get(client, url)
+                except httpx.HTTPError as e:
+                    return self._error_result(info, str(e))
+                soup = make_soup(resp.text)
+            if not _is_logged_in(soup):
+                logger.error("Session expired while scraping %s", url)
+                return self._error_result(info, "session expired — not logged in")
 
         title = _extract_title(soup) or info.get("title", slug)
         if title.lower().strip() in _UTILITY_PAGES:
@@ -1890,6 +1968,31 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     # ── Worker ──────────────────────────────────────────────────────────────
 
+    async def _relogin_shared_client(self, client) -> bool:
+        """Log the shared session back in after an expiry, at most once at a time.
+
+        Every worker shares one client, so an expiry mid-run would otherwise
+        fail every remaining series. Workers that hit it together must not
+        each fire their own login -- that is what made a sibling site start
+        refusing logins outright -- so the lock plus the counter means the
+        first one re-logs in and the rest simply reuse the result.
+        """
+        async with self._client_lock:
+            attempt = self._relogin_count
+        if attempt >= _MAX_RELOGINS:
+            return False
+        async with self._client_lock:
+            if self._relogin_count != attempt:
+                return True  # someone else just refreshed it
+            self._relogin_count += 1
+            try:
+                await self._login_client(client)
+                logger.warning("Session had expired; logged back in (attempt %d)", self._relogin_count)
+                return True
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.error("Re-login after session expiry failed: %s", exc)
+                return False
+
     async def _acquire_client(self):
         """Hand out the single logged-in session that every worker shares.
 
@@ -1954,7 +2057,21 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 except asyncio.QueueEmpty:
                     break
 
-                result = await self._scrape_one_series(client, info)
+                try:
+                    result = await self._scrape_one_series(client, info)
+                except (ScrapingPausedError, asyncio.CancelledError):
+                    raise
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    # Contain a per-series failure the way the bs.to project
+                    # already does: one unparseable page should cost that
+                    # series, not abandon the rest of the queue.
+                    logger.error(
+                        "Worker %d unexpected error on %s: %s",
+                        worker_id,
+                        info.get("url", "?"),
+                        exc,
+                    )
+                    result = self._error_result(info, f"unexpected error: {exc}")
 
                 if result.get("_error"):
                     reason = result.get("_error_reason") or "scrape_error"
@@ -2189,6 +2306,17 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             await asyncio.gather(*tasks, return_exceptions=True)
             self.series_data = results
             raise
+        except BaseException:
+            # Any other failure (a parser bug, Ctrl+C, a cancelled task) used
+            # to skip the assignment below, so every series scraped since the
+            # last checkpoint was thrown away and the siblings were left
+            # running detached. Keep the work and stop the pool, exactly as
+            # the pause path does, then let the error travel on.
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.series_data = results
+            raise
 
         self.series_data = results
 
@@ -2375,6 +2503,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             print("→ Fetching series list...")
             all_series = await self._get_all_series(tmp)
             await tmp.aclose()
+            if not self._confirm_catalogue_size(all_series):
+                return
             self.all_discovered_series = all_series
             self._check_ignored_vs_catalog(all_series)
             self._check_index_vs_catalog(all_series, quiet=True)
@@ -2388,7 +2518,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             ]
             new_list, rename_titles = self._filter_new_entries(new_list, all_series)
             if rename_titles:
-                print(f"\nℹ {len(rename_titles)} renamed series skipped (listed as vanished):")
+                print(f"\nℹ {len(rename_titles)} possible rename(s) of vanished series (still scraped):")
                 for t in sorted(rename_titles)[:10]:
                     print(f"  ~ {t}")
                 if len(rename_titles) > 10:
@@ -2410,6 +2540,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         print("→ Fetching series list...")
         all_series = await self._get_all_series(tmp)
         await tmp.aclose()
+        if not self._confirm_catalogue_size(all_series):
+            return
         self.all_discovered_series = all_series
         ignored_slugs = self.get_ignored_slugs()
         print(f"✓ Found {len(all_series)} series")
@@ -2428,14 +2560,15 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         new_titles = [s["title"] for s in new_titles]
         if new_titles or rename_titles:
             print(
-                f"\nℹ {len(new_titles)} new series detected ({len(rename_titles)} renamed series skipped as vanished):"
+                f"\nℹ {len(new_titles)} new series detected "
+                f"({len(rename_titles)} possible rename(s) of vanished series, still scraped):"
             )
             for t in new_titles[:10]:
                 print(f"  + {t}")
             if len(new_titles) > 10:
                 print(f"  ... and {len(new_titles) - 10} more")
             if rename_titles:
-                print("  Renamed series skipped:")
+                print("  Possible renames of vanished series (still scraped):")
                 for t in sorted(rename_titles)[:10]:
                     print(f"    ~ {t}")
                 if len(rename_titles) > 10:
@@ -2543,6 +2676,16 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             if self.failed_links:
                 self.save_failed_series()
         except (KeyboardInterrupt, SystemExit):
+            self.save_checkpoint(include_data=True)
+            if self.failed_links:
+                self.save_failed_series()
+            raise
+        except Exception:  # pylint: disable=broad-exception-caught
+            # An unexpected failure is exactly when the partial work matters
+            # most: without this the run's scraped series and failed list were
+            # both discarded and the next run started over from the last
+            # checkpoint interval. Persist, then re-raise unchanged.
+            logger.exception("Unexpected error during scrape — saving partial progress")
             self.save_checkpoint(include_data=True)
             if self.failed_links:
                 self.save_failed_series()
