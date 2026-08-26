@@ -118,6 +118,15 @@ DEFAULT_BATCH_FILE = os.path.abspath(DEFAULT_BATCH_FILE_PATH)
 # Re-measured after workers began sharing one logged-in session: the old
 # per-worker login both skewed the comparison and cost real throughput,
 # and it is what made this site start refusing logins during benchmarking.
+#
+# Where the time actually goes, measured with the built-in PhaseProfiler
+# over 300 series x2 shuffled passes at these settings:
+#   network 98.1%   parse 1.8%   checkpoint <0.1%
+# Parsing costs 19% of ONE core across the run, so the scrape is bound by
+# the network and not by this process. Offloading parse off the event loop was
+# already measured 2-2.7x SLOWER (see parse_season_html), and the lxml parser
+# cut per-page parse time another 4.4x on top, so there is nothing left to
+# win here. Do not reopen this without a fresh profile showing otherwise.
 NUM_WORKERS = int(os.getenv("STO_MAX_WORKERS", "8"))
 
 # Season pages of one series are independent GETs. Fetching them one after
