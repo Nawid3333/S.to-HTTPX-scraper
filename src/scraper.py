@@ -1515,7 +1515,6 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             self.site_url = previous_site_url
 
     # Kept for backwards compatibility; prefer get_catalogue_info_for_site.
-    # Kept for backwards compatibility; prefer get_catalogue_info_for_site.
     async def verify_series_url(
         self,
         client: httpx.AsyncClient,
