@@ -2052,7 +2052,12 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 return True  # someone else just refreshed it
             self._relogin_count += 1
             try:
-                await self._login_client(client)
+                # _login_client takes the host explicitly here, unlike the
+                # siblings' one-argument version. Calling it without one raised
+                # TypeError into the catch below, so this path logged "re-login
+                # failed" and gave up without ever attempting a login -- every
+                # remaining series in the run then failed on the dead session.
+                await self._login_client(client, self.site_url)
                 logger.warning("Session had expired; logged back in (attempt %d)", self._relogin_count)
                 return True
             except Exception as exc:  # pylint: disable=broad-exception-caught
