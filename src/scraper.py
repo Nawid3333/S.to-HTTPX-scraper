@@ -1356,7 +1356,9 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         except OSError:
             pass
 
-    async def _login_client(self, client: httpx.AsyncClient, site_url: str) -> None:
+    async def _login_client(
+        self, client: httpx.AsyncClient, site_url: str, verify: bool = True
+    ) -> None:
         """Log in an existing httpx client to the active s.to site."""
         login_url = _build_full_url(site_url, LOGIN_PATH)
         try:
@@ -1398,6 +1400,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             raise RuntimeError(f"Login submission returned status {login_resp.status_code}")
 
         # Verify on a non-login page instead of trusting the login response.
+        if not verify:
+            return
         verify_url = _build_full_url(site_url, "/")
         try:
             verify_resp = await client.get(verify_url)
@@ -1410,8 +1414,15 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             await client.aclose()
             raise RuntimeError("Login failed — check credentials")
 
-    async def _try_login_on_site(self, site_url) -> httpx.AsyncClient:
-        """Create a new httpx client and log it in to the given site."""
+    async def _try_login_on_site(self, site_url, verify: bool = True) -> httpx.AsyncClient:
+        """Create a new httpx client and log it in to the given site.
+
+        verify: fetch a known-good page afterwards and confirm the session
+            really is logged in. Callers that immediately fetch the catalogue
+            pass False: _get_all_series applies the same _is_logged_in check
+            to the same response, so verifying here only downloads the page a
+            second time to reach the same verdict.
+        """
         client = httpx.AsyncClient(
             http2=True,
             headers={"User-Agent": UA},
@@ -1427,7 +1438,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 max_keepalive_connections=self.pool_workers * SEASON_CONCURRENCY + 4,
             ),
         )
-        await self._login_client(client, site_url)
+        await self._login_client(client, site_url, verify=verify)
         return client
 
     async def _probe_one_site(self, site_url: str) -> dict:
@@ -1482,7 +1493,11 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         previous_site_url = self.site_url
         try:
             self.site_url = site_url
-            client = await self._create_logged_in_client()
+            # _get_all_series fetches the catalogue and applies the same
+            # logged-in check the login's verify step would, so verifying
+            # here only downloaded a second large page to reach the same
+            # verdict.
+            client = await self._create_logged_in_client(verify=False)
             try:
                 series = await self._get_all_series(client)
             finally:
@@ -1611,7 +1626,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             if client and not client.is_closed:
                 await client.aclose()
 
-    async def _create_logged_in_client(self) -> httpx.AsyncClient:
+    async def _create_logged_in_client(self, verify: bool = True) -> httpx.AsyncClient:
         """Create a logged-in HTTP client for the currently selected site.
 
         This implementation uses the single active host selected at startup
@@ -1620,7 +1635,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         # Always use the currently selected site (selected at startup)
         # No fallback during scraping operations as per requirements
         try:
-            return await self._try_login_on_site(self.site_url)
+            return await self._try_login_on_site(self.site_url, verify=verify)
         except RuntimeError as exc:
             # Log the error but don't fallback during scraping
             logger.error("Login failed for site %s: %s", self.site_url, exc)
