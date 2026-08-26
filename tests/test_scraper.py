@@ -146,11 +146,11 @@ class TestExtractTitle(unittest.TestCase):
         self.assertEqual(str(s), before)
 
 
-class TestParseEpisodesTakesSoup(unittest.TestCase):
+class TestParseEpisodesTakesHtml(unittest.TestCase):
     def test_missing_episode_table_returns_none(self):
         """No episode table at all = we don't understand this page = failure."""
         html = "<html><body></body></html>"
-        self.assertIsNone(_parse_episodes(soup(html)))
+        self.assertIsNone(_parse_episodes(html))
 
     def test_empty_but_present_table_returns_empty_list(self):
         """Table present with zero rows = a season listed before its episodes
@@ -158,7 +158,7 @@ class TestParseEpisodesTakesSoup(unittest.TestCase):
         with an empty body for such a season, and four of them exist in this
         project's own index -- erroring on them would break real series."""
         html = "<html><body><div class='episode-table'><tbody></tbody></div></body></html>"
-        self.assertEqual(_parse_episodes(soup(html)), [])
+        self.assertEqual(_parse_episodes(html), [])
 
     def test_row_with_bad_number_returns_none(self):
         html = """
@@ -166,7 +166,7 @@ class TestParseEpisodesTakesSoup(unittest.TestCase):
             <tr><td>not-a-number</td><td>junk</td></tr>
         </table>
         """
-        self.assertIsNone(_parse_episodes(soup(html)))
+        self.assertIsNone(_parse_episodes(html))
 
     def test_normal_row_parses(self):
         html = """
@@ -175,9 +175,29 @@ class TestParseEpisodesTakesSoup(unittest.TestCase):
             <td class="episode-title-ger">Pilot</td>
         </tr></table>
         """
-        episodes = _parse_episodes(soup(html))
+        episodes = _parse_episodes(html)
         self.assertEqual(len(episodes), 1)
         self.assertEqual(episodes[0]["number"], 1)
+
+    def test_a_bare_table_fragment_still_parses(self):
+        """Markup whose outermost element IS the table must still parse.
+
+        lxml.html.fromstring returns a bare fragment root, so a .//table
+        search matches nothing and the page reads as unparseable -- a
+        regression the BeautifulSoup version never had, because it always
+        wrapped input in html/body. Caught by differencing the two on
+        fragment-shaped input, not by any existing test. Pins
+        document_fromstring.
+        """
+        html = (
+            "<table class='episodes'><tr><th class='episode-number-cell'>1</th>"
+            "<td class='episode-title-ger'>Pilot</td></tr></table>"
+        )
+        self.assertEqual(_parse_episodes(html), [{"number": 1, "watched": False, "title_ger": "Pilot"}])
+
+    def test_a_bare_empty_table_fragment_is_an_empty_season(self):
+        """Same shape, no rows: still [] (a real season state), not None."""
+        self.assertEqual(_parse_episodes("<table class='episodes'></table>"), [])
 
 
 # ==================== unparseable season handling ====================

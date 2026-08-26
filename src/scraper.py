@@ -18,6 +18,8 @@ import time
 from urllib.parse import urlparse
 
 import httpx
+import lxml.etree
+import lxml.html
 from bs4 import BeautifulSoup
 
 from config.config import (  # pylint: disable=import-error,no-name-in-module
@@ -52,9 +54,13 @@ except ImportError:  # pragma: no cover - depends on the install
 def make_soup(html: str) -> BeautifulSoup:
     """Parse a page with the fastest parser available.
 
-    Every parse in this module goes through here so the choice is made in
-    exactly one place -- a parser swap must never be able to apply to some
-    pages and not others.
+    Every BeautifulSoup parse in this module goes through here so the choice
+    is made in exactly one place -- a parser swap must never be able to apply
+    to some pages and not others.
+
+    Season pages are the exception and no longer come through here: they are
+    the hot path and go straight to lxml instead. Everything else (series
+    pages, the catalogue, account pages, login) still uses this.
     """
     return BeautifulSoup(html, _HTML_PARSER)
 
@@ -115,30 +121,31 @@ class RateGuard:
             self._penalty = max(0.0, self._penalty * 0.5)
 
 
-# NOT restricted with a SoupStrainer, deliberately. Straining season pages to
-# the <table> subtree parses 1.2-1.6x faster and was byte-identical on every
-# captured fixture -- but _parse_episodes accepts `.episode-table` on *any*
-# element and carries generic fallbacks precisely so a site redesign does not
-# break it. A strainer keyed on tag names throws that resilience away: the
-# existing empty-season test uses <div class="episode-table">, guarding four
-# real series (alaska-eisige-tradition s2, die-schluempfe s0,
-# helden-der-baustelle s3, marry-my-husband s0), and it fails under the
-# strainer. A few percent of parse time is not worth narrowing what the
-# scraper can still read correctly.
-
-
 def parse_season_html(html: str):
     """Parse one season page and return plain data, never a soup object.
 
-    Deliberately called inline, not through asyncio.to_thread. Offloading it
-    was tried and measured 2-2.7x SLOWER on the captured fixture pages
-    (53 -> 25/22/20 pages/s at 4/8/16 concurrent), and slower still with more
-    workers. lxml releases the GIL for the raw parse, but BeautifulSoup then
-    builds its own object tree in pure Python and holds the GIL for most of
-    the work, so threads buy contention and dispatch overhead and no
-    parallelism. Keep this on the event loop unless a profile says otherwise.
+    Goes straight to lxml rather than through BeautifulSoup. The tree build
+    was most of the cost here, and the whole worker pool shares one event
+    loop, so that time overlapped with nothing -- it was simply the ceiling
+    the pool kept hitting. _parse_episodes was verified against the recorded
+    output of the BeautifulSoup version over 553 real pages before this
+    switched over.
+
+    Also deliberately not offloaded to asyncio.to_thread. That was tried and
+    measured 1.8-2.7x SLOWER, both on the old parser and again at today's
+    worker counts: lxml releases the GIL for the raw parse, but the dispatch
+    and contention cost more than the parallelism buys. Keep this on the
+    event loop unless a profile says otherwise.
+
+    Not narrowed to the <table> subtree either. _parse_episodes accepts
+    `.episode-table` on *any* element and carries generic fallbacks precisely
+    so a site redesign does not break it; restricting the parse to a tag name
+    throws that resilience away. The empty-season test uses
+    <div class="episode-table">, guarding four real series
+    (alaska-eisige-tradition s2, die-schluempfe s0, helden-der-baustelle s3,
+    marry-my-husband s0).
     """
-    return _parse_episodes(make_soup(html))
+    return _parse_episodes(html)
 
 
 class PhaseProfiler:
@@ -462,6 +469,12 @@ def _is_logged_in(soup: BeautifulSoup) -> bool:
 # ── Language detection ────────────────────────────────────────────────────
 
 # Language flag identifier → normalized language code
+# Flag identifiers appear three ways in the markup; compiled once here
+# rather than per row, because these run for every episode of every page.
+_ICON_FLAG_RE = re.compile(r"icon-flag-([a-z0-9\-]+)", re.IGNORECASE)
+_CLASS_FLAG_RE = re.compile(r"flag-([a-z0-9\-]+)", re.IGNORECASE)
+_IMG_FLAG_RE = re.compile(r"([a-z0-9\-]+)\.(?:svg|png|jpg)", re.IGNORECASE)
+
 _LANGUAGE_FLAG_MAP = {
     # German variants
     "german": "german_dub",
@@ -493,26 +506,62 @@ _LANGUAGE_FLAG_MAP = {
 }
 
 
+def _hc(name: str) -> str:
+    """XPath predicate matching one whitespace-delimited class token.
+
+    `contains(@class, 'seen')` would also match `unseen`, which is exactly
+    the kind of near-miss that turns into wrong watch data rather than an
+    error, so every class test goes through this.
+    """
+    return f"contains(concat(' ', normalize-space(@class), ' '), ' {name} ')"
+
+
+# The CSS these replace used descendant combinators, and BeautifulSoup's
+# find_all/find are recursive too -- hence .// throughout, never a child axis.
+_XP_ROWS_PRIMARY = f".//*[{_hc('episode-table')}]//tbody//tr[{_hc('episode-row')}]"
+_XP_ROWS_ANY_TR = f".//tr[{_hc('episode-row')}]"
+_XP_ROWS_ANY_EL = f".//*[{_hc('episode-row')}]"
+_XP_TABLE_EPISODES = f".//table[{_hc('episodes')}]"
+_XP_ANY_EPISODE_TABLE = f".//*[{_hc('episode-table')}] | .//table[{_hc('episodes')}]"
+_XP_NUMBER_CELL = f".//th[{_hc('episode-number-cell')}]"
+_XP_TITLE_GER = f".//*[{_hc('episode-title-ger')}]"
+_XP_TITLE_ENG = f".//*[{_hc('episode-title-eng')}]"
+_XP_LANGUAGE_CELL = f".//td[{_hc('episode-language-cell')}]"
+_XP_FLAGGY_CELL = ".//svg[contains(@class, 'flag')] | .//use[contains(@href, 'flag')]"
+
+
+def _stripped_text(el) -> str:
+    """lxml equivalent of BeautifulSoup's get_text(strip=True).
+
+    Not the same as text_content().strip(): BeautifulSoup strips *each* text
+    node and joins them with nothing, so a title split across inline markup
+    comes out glued rather than double-spaced. Joining the raw text instead
+    would quietly rewrite every stored episode title.
+    """
+    return "".join(t.strip() for t in el.itertext())
+
+
 def _extract_languages_from_row(row) -> list[str]:
     """Return normalized language codes from SVG/IMG flag icons in a row."""
     languages: list[str] = []
     seen: set[str] = set()
 
-    lang_cell = row.select_one("td.episode-language-cell")
-    if not lang_cell:
+    cells = row.xpath(_XP_LANGUAGE_CELL)
+    lang_cell = cells[0] if cells else None
+    if lang_cell is None:
         # Fallback: any cell that contains flag icons
-        for cell in row.find_all("td"):
-            if cell.select_one("svg[class*='flag'], use[href*='flag']"):
+        for cell in row.xpath(".//td"):
+            if cell.xpath(_XP_FLAGGY_CELL):
                 lang_cell = cell
                 break
 
-    if not lang_cell:
+    if lang_cell is None:
         return languages
 
     # SVG <use href="#icon-flag-german"> style
-    for use in lang_cell.find_all("use"):
+    for use in lang_cell.xpath(".//use"):
         href = use.get("href") or use.get("xlink:href") or ""
-        m = re.search(r"icon-flag-([a-z0-9\-]+)", href, re.IGNORECASE)
+        m = _ICON_FLAG_RE.search(href)
         if m:
             code = _LANGUAGE_FLAG_MAP.get(m.group(1).lower())
             if code and code not in seen:
@@ -520,23 +569,26 @@ def _extract_languages_from_row(row) -> list[str]:
                 languages.append(code)
 
     # SVG class style: svg-flag-german
-    for svg in lang_cell.find_all("svg"):
-        classes = " ".join(svg.get("class") or [])
-        for token in re.findall(r"flag-([a-z0-9\-]+)", classes, re.IGNORECASE):
+    for svg in lang_cell.xpath(".//svg"):
+        classes = svg.get("class") or ""
+        for token in _CLASS_FLAG_RE.findall(classes):
             code = _LANGUAGE_FLAG_MAP.get(token.lower())
             if code and code not in seen:
                 seen.add(code)
                 languages.append(code)
 
     # IMG src style: german.svg or flag-german.png
-    for img in lang_cell.find_all("img"):
+    for img in lang_cell.xpath(".//img"):
         src = img.get("src", "")
         title_attr = img.get("title", "")
-        for token in re.findall(r"([a-z0-9\-]+)\.(?:svg|png|jpg)", src, re.IGNORECASE):
+        for token in _IMG_FLAG_RE.findall(src):
             code = _LANGUAGE_FLAG_MAP.get(token.lower())
             if code and code not in seen:
                 seen.add(code)
                 languages.append(code)
+        # Reads the output list, not the seen-set: the title attribute is
+        # only consulted when nothing at all has been recognised yet. That is
+        # how it already behaved, so it stays that way.
         if title_attr and not languages:
             code = _LANGUAGE_FLAG_MAP.get(title_attr.lower())
             if code and code not in seen:
@@ -549,8 +601,16 @@ def _extract_languages_from_row(row) -> list[str]:
 # ── HTML helpers ────────────────────────────────────────────────────────────
 
 
-def _parse_episodes(soup: BeautifulSoup) -> list[dict] | None:
+def _parse_episodes(html: str) -> list[dict] | None:
     """Parse episode rows from a season page.
+
+    Takes the raw HTML rather than a soup: building a BeautifulSoup tree
+    measured most of this function's cost, and the event loop was spending a
+    large share of a run's wall clock inside it (workers share one loop, so
+    that time overlaps with nothing). Going straight to lxml is ~4.4x faster
+    on real season pages. Output is unchanged: verified against the recorded
+    output of the previous implementation over 553 pages and 8,305 episodes,
+    including the fallback branches that only synthetic markup reaches.
 
     Uses s.to-specific selectors:
       - Table: .episode-table tbody tr.episode-row
@@ -572,39 +632,45 @@ def _parse_episodes(soup: BeautifulSoup) -> list[dict] | None:
         failure -- storing 0 there corrupts the index and shows up later as
         a false "this series lost all its episodes" mismatch.
     """
+    try:
+        # document_fromstring, not fromstring: fromstring returns a bare
+        # fragment root, so markup whose outermost element is the table
+        # itself never matches a .//table search and the page would read as
+        # a parse failure. BeautifulSoup always wraps in html/body, and this
+        # has to match it.
+        doc = lxml.html.document_fromstring(html)
+    except (lxml.etree.ParserError, ValueError):
+        # An empty or non-markup body is a failed fetch, not an empty season.
+        return None
+
     # Try s.to-specific selectors first
-    rows = soup.select(".episode-table tbody tr.episode-row")
-    if not rows:
-        rows = soup.select("tr.episode-row")
-    if not rows:
-        rows = soup.select(".episode-row")
+    rows = doc.xpath(_XP_ROWS_PRIMARY) or doc.xpath(_XP_ROWS_ANY_TR) or doc.xpath(_XP_ROWS_ANY_EL)
     if not rows:
         # Final fallback: generic table rows (like bs.to)
-        table = soup.select_one("table.episodes")
-        if table:
-            rows = table.select("tr")
+        tables = doc.xpath(_XP_TABLE_EPISODES)
+        if tables:
+            rows = tables[0].xpath(".//tr")
 
     if not rows:
         # Tell "the table is there, it's just empty" (a real, if rare,
         # season state) apart from "this page has no episode table at all"
         # (a redesign, a truncated response, or a soft error page).
-        if soup.select_one(".episode-table, table.episodes") is None:
+        if not doc.xpath(_XP_ANY_EPISODE_TABLE):
             return None
         return []
 
     episodes = []
     for idx, row in enumerate(rows, start=1):
         # Extract episode number
-        num_cell = row.select_one("th.episode-number-cell")
-        ep_num = num_cell.get_text(strip=True) if num_cell else ""
+        num_cell = row.xpath(_XP_NUMBER_CELL)
+        ep_num = _stripped_text(num_cell[0]) if num_cell else ""
         if not ep_num:
             # Fallback: data attribute or first <td>
-            ep_num_attr = _attr_str(row.get("data-episode-season-id"))
-            ep_num = ep_num_attr or ""
+            ep_num = row.get("data-episode-season-id") or ""
         if not ep_num:
-            cols = row.find_all("td")
+            cols = row.xpath(".//td")
             if cols:
-                ep_num = cols[0].get_text(strip=True)
+                ep_num = _stripped_text(cols[0])
         if not ep_num:
             logger.warning("Could not determine episode number for row %d", idx)
             return None
@@ -617,24 +683,24 @@ def _parse_episodes(soup: BeautifulSoup) -> list[dict] | None:
             return None
 
         # Extract titles (German and English)
-        ger_cell = row.select_one(".episode-title-ger")
-        eng_cell = row.select_one(".episode-title-eng")
-        title_ger = ger_cell.get_text(strip=True) if ger_cell else ""
-        title_eng = eng_cell.get_text(strip=True) if eng_cell else ""
+        ger_cell = row.xpath(_XP_TITLE_GER)
+        eng_cell = row.xpath(_XP_TITLE_ENG)
+        title_ger = _stripped_text(ger_cell[0]) if ger_cell else ""
+        title_eng = _stripped_text(eng_cell[0]) if eng_cell else ""
 
         # Fallback: generic title from <strong> in second column (bs.to style)
         title = ""
         if not title_ger and not title_eng:
-            cols = row.find_all("td")
+            cols = row.xpath(".//td")
             if len(cols) >= 2:
-                title_tag = cols[1].find("strong")
-                title = title_tag.get_text(strip=True) if title_tag else cols[1].get_text(strip=True)
+                title_tag = cols[1].xpath(".//strong")
+                title = _stripped_text(title_tag[0]) if title_tag else _stripped_text(cols[1])
 
         # Language flags
         languages = _extract_languages_from_row(row)
 
         # Check if watched — s.to uses 'seen' class, bs.to uses 'watched' class
-        row_classes = row.get("class") or []
+        row_classes = (row.get("class") or "").split()
         watched = "seen" in row_classes or "watched" in row_classes
 
         ep = {"number": ep_num_int, "watched": watched}
