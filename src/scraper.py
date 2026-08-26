@@ -2403,15 +2403,16 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 "url": canonical_url,
                 "scrape_url": main_url,
             }
-            print(f"→ Scraping single series: {canonical_url}")
+            print(f"\u2192 Scraping single series: {canonical_url}")
             self.attempted_urls.add(canonical_url)
-            result = await self._scrape_one_series(tmp, info)
             await tmp.aclose()
-            if result.get("_error"):
-                self.failed_links.append(info)
-                self.series_data = []
-            else:
-                self.series_data = [result]
+            # Go through the worker pool with a single worker instead of
+            # calling _scrape_one_series directly. Done directly, a one-series
+            # run finished silently: no progress line, no episode count, and
+            # none of the empty-page or episode-0 warnings the pool raises.
+            # One worker costs one extra login and makes this mode report
+            # exactly like every other one.
+            await self._scrape_list([info], num_workers=1)
             # Single-series runs have no partial resume state to preserve.
             self.clear_checkpoint()
             return
