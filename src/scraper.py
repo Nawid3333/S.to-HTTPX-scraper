@@ -945,6 +945,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         self._pause_cached = False
         self.paused = False
         self._ignored_seasons_cache: set[tuple[str, str]] | None = None
+        # Filled on first lookup; see _index_items.
+        self._index_items_cache: list | None = None
         self._stale_ignored_warnings: list[dict] = []
         self.site_url = SITE_URLS[0]
         self._interrupt_requested = False
@@ -1230,9 +1232,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         index_map: dict[str, str] = {}
         try:
             if os.path.exists(SERIES_INDEX_FILE):
-                with open(SERIES_INDEX_FILE, encoding="utf-8") as f:
-                    data = json.load(f)
-                items = data if isinstance(data, list) else list(data.values())
+                items = self._index_items()
                 for item in items:
                     url = item.get("url", "") or item.get("link", "")
                     slug = self.get_series_slug_from_url(url)
@@ -1264,9 +1264,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         try:
             if not os.path.exists(SERIES_INDEX_FILE):
                 return entries
-            with open(SERIES_INDEX_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            items = data if isinstance(data, list) else list(data.values())
+            items = self._index_items()
             for item in items:
                 if not isinstance(item, dict):
                     continue
@@ -1711,13 +1709,43 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             return False
         return True
 
+    def _index_items(self) -> list:
+        """Every entry in the index, parsed at most once per run.
+
+        Five lookups each opened and parsed the index file for themselves, so
+        a new-only run parsed an 84 MB file four times before fetching
+        anything -- and the same three lines of open/parse/normalise were
+        copied into all five.
+
+        Caching is safe because nothing in this module writes the index: the
+        save goes through IndexManager after run() returns, and main.py builds
+        a fresh scraper for every action, so the cache never outlives the run
+        that filled it.
+
+        Never raises. A missing or unreadable index yields an empty list,
+        which is what each caller's own guard produced before.
+
+        The list is shared between callers, so treat it as read-only. Every
+        lookup here only reads; mutating it would now be visible to the rest.
+        """
+        if self._index_items_cache is None:
+            items: list = []
+            try:
+                if os.path.exists(SERIES_INDEX_FILE):
+                    with open(SERIES_INDEX_FILE, encoding="utf-8") as f:
+                        data = json.load(f)
+                    items = data if isinstance(data, list) else list(data.values())
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.warning("Could not read the index for lookups", exc_info=True)
+                items = []
+            self._index_items_cache = items
+        return self._index_items_cache
+
     def load_existing_slugs(self) -> set[str]:
         existing = set()
         try:
             if os.path.exists(SERIES_INDEX_FILE):
-                with open(SERIES_INDEX_FILE, encoding="utf-8") as f:
-                    data = json.load(f)
-                items = data if isinstance(data, list) else list(data.values())
+                items = self._index_items()
                 for item in items:
                     url = item.get("url", "") or item.get("link", "")
                     if url:
@@ -2313,9 +2341,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         try:
             if not os.path.exists(SERIES_INDEX_FILE):
                 return None
-            with open(SERIES_INDEX_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            items = data if isinstance(data, list) else list(data.values())
+            items = self._index_items()
             slug_map: dict[str, float] = {}
             for item in items:
                 url = item.get("url", "") or item.get("link", "")
@@ -2347,9 +2373,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         try:
             if not os.path.exists(SERIES_INDEX_FILE):
                 return None
-            with open(SERIES_INDEX_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            items = data if isinstance(data, list) else list(data.values())
+            items = self._index_items()
             values = [
                 float(item["avg_scrape_seconds"])
                 for item in items
