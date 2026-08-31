@@ -191,8 +191,7 @@ class PhaseProfiler:
             count = self._counts[name]
             share = seconds / total * 100 if total else 0
             lines.append(
-                f"  {name:<12} {seconds:8.1f}s  {share:5.1f}%  "
-                f"n={count:<6} avg={seconds / count * 1000:7.1f}ms"
+                f"  {name:<12} {seconds:8.1f}s  {share:5.1f}%  n={count:<6} avg={seconds / count * 1000:7.1f}ms"
             )
         print("\n".join(lines))
 
@@ -241,8 +240,6 @@ def _retry_after_seconds(resp) -> float | None:
         return float(raw)
     except (TypeError, ValueError):
         return None
-
-
 
 
 # ── Rename matching helpers ─────────────────────────────────────────────────
@@ -1379,9 +1376,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         except OSError:
             pass
 
-    async def _login_client(
-        self, client: httpx.AsyncClient, site_url: str, verify: bool = True
-    ) -> None:
+    async def _login_client(self, client: httpx.AsyncClient, site_url: str, verify: bool = True) -> None:
         """Log in an existing httpx client to the active s.to site."""
         login_url = _build_full_url(site_url, LOGIN_PATH)
         try:
@@ -1468,19 +1463,19 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         """Return probe result for a single site URL."""
         try:
             client = httpx.AsyncClient(
-            http2=True,
+                http2=True,
                 headers={"User-Agent": UA},
                 timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
                 follow_redirects=True,
                 limits=httpx.Limits(
-                # One worker now has up to SEASON_CONCURRENCY season fetches
-                # in flight at once, so a 2-connection pool would serialise
-                # the fan-out straight back into the queue it was meant to
-                # remove. Keepalive matches it so those connections survive
-                # between series instead of re-handshaking each time.
-                max_connections=self.pool_workers * SEASON_CONCURRENCY + 4,
-                max_keepalive_connections=self.pool_workers * SEASON_CONCURRENCY + 4,
-            ),
+                    # One worker now has up to SEASON_CONCURRENCY season fetches
+                    # in flight at once, so a 2-connection pool would serialise
+                    # the fan-out straight back into the queue it was meant to
+                    # remove. Keepalive matches it so those connections survive
+                    # between series instead of re-handshaking each time.
+                    max_connections=self.pool_workers * SEASON_CONCURRENCY + 4,
+                    max_keepalive_connections=self.pool_workers * SEASON_CONCURRENCY + 4,
+                ),
             )
             async with client as session:
                 resp = await session.get(_build_full_url(site_url, LOGIN_PATH))
