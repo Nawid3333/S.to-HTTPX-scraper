@@ -322,6 +322,34 @@ class TestSeasonPageLoggedOut(TestScrapeOneSeriesUnparseableSeason):
         self.assertEqual(result["total_episodes"], 1)
 
 
+class TestDuplicateEpisodeNumbers(unittest.TestCase):
+    """A duplicated episode number means the row selector over-matched.
+
+    The watched flags on such a page describe rows the parser misread, so the
+    season is a scrape failure rather than data. None of the 36 recorded
+    season fixtures contains a duplicate, so this cannot fire on real markup.
+    """
+
+    def test_duplicate_numbers_are_a_parse_failure(self):
+        html = """
+        <table class="episodes">
+          <tr><th class="episode-number-cell">1</th><td class="episode-title-ger">A</td></tr>
+          <tr><th class="episode-number-cell">1</th><td class="episode-title-ger">B</td></tr>
+        </table>
+        """
+        self.assertIsNone(_parse_episodes(html))
+
+    def test_distinct_numbers_still_parse(self):
+        html = """
+        <table class="episodes">
+          <tr><th class="episode-number-cell">1</th><td class="episode-title-ger">A</td></tr>
+          <tr><th class="episode-number-cell">2</th><td class="episode-title-ger">B</td></tr>
+        </table>
+        """
+        eps = _parse_episodes(html)
+        self.assertEqual([e["number"] for e in eps], [1, 2])
+
+
 # ==================== season counter drift (One Piece S23 regression) ====
 class TestSeasonCounterDrift(unittest.TestCase):
     """A season that gains episodes must not keep its old stored counters.
