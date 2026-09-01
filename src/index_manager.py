@@ -315,7 +315,6 @@ def _flag_new_series_non_default_state(title, new_series, changes):
         changes["watchlist_added"].append(title)
 
 
-
 def _report_order(title):
     """Sort key for anything the change report lists, case-insensitively.
 
@@ -324,6 +323,7 @@ def _report_order(title):
     """
     text = str(title)
     return (text.lower(), text)
+
 
 def detect_changes(old_data, new_data):
     """Detect changes between old and new data."""
@@ -631,8 +631,7 @@ class IndexManager:
                 self.series_index = validated_index
                 if rehosted:
                     print(
-                        f"[INFO] Repointed {rehosted} index entry(s) to {SITE_URL} "
-                        "(stored host no longer configured)."
+                        f"[INFO] Repointed {rehosted} index entry(s) to {SITE_URL} (stored host no longer configured)."
                     )
                     logger.warning("Repointed %d index entry(s) to %s", rehosted, SITE_URL)
                 if not self.series_index:
