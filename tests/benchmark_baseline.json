@@ -1,9 +1,9 @@
 {
-  "detect_changes/300_series": 0.010265699995215982,
-  "get_episode_counts/300_series": 0.0012970000097993761,
-  "index/json_load_300_series": 0.007053999986965209,
-  "make_soup/real_season_page": 0.01781630000914447,
-  "merge/300_series_x_4_seasons": 0.06583509998745285,
-  "mismatch_scan/300_series": 0.012659700005315244,
-  "parse_season_html/real_season_page": 0.005234799988102168
+  "detect_changes/300_series": 0.01078909999341704,
+  "get_episode_counts/300_series": 0.0012897000124212354,
+  "index/json_load_300_series": 0.006752399989636615,
+  "make_soup/real_season_page": 0.019889400020474568,
+  "merge/300_series_x_4_seasons": 0.04059700001380406,
+  "mismatch_scan/300_series": 0.013173800020013005,
+  "parse_season_html/real_season_page": 0.007421799993608147
 }
