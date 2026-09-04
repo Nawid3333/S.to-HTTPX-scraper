@@ -28,7 +28,18 @@ from typing import Protocol
 from config.config import DATA_DIR, NUM_WORKERS, SERIES_INDEX_FILE, SITE_URL
 from src.atomic_io import atomic_write_json
 from src.index_manager import IndexManager, get_episode_counts, paginate_list
-from src.scraper import ProgressWriter, SToScraper, _extract_title, _is_logged_in, make_soup
+from src.scraper import (
+    ProgressWriter,
+    SToScraper,
+    _extract_title,
+    _first,
+    _hc,
+    _is_logged_in,
+    _stripped_text,
+    make_doc,
+)
+from src.term import cinput as input
+from src.term import cprint as print
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +87,20 @@ def normalize_genre_key(value: object) -> str:
 # The only part of this module that differs between the three scrapers.
 
 
-def _scan_genre_block(soup) -> tuple[list[tuple[str, str]], int, int, int | None]:
+# lxml translations of the CSS this module used to hand to BeautifulSoup.
+# The genre scan runs once per series page, so it rides the same tree the
+# title and login checks use rather than building a second one.
+_XP_SERIES_GROUPS = f".//li[{_hc('series-group')}]"
+_XP_GROUP_STRONG = ".//strong"
+_XP_GENRE_ANCHORS = ".//a[starts-with(@href, '/genre/')]"
+# Direct children only -- the bs4 original passed recursive=False, and that is
+# what makes this the visible-before-truncation count: the hidden genres sit
+# inside a nested span.extra-items.
+_XP_DIRECT_ANCHORS = "./a"
+_XP_TOGGLE_MORE = f".//button[{_hc('toggle-more')}]"
+
+
+def _scan_genre_block(doc) -> tuple[list[tuple[str, str]], int, int, int | None]:
     """One traversal of the Genre li.series-group -> (genres, visible, raw_anchors, hidden).
 
     Two traps live in the same element: an identical li.series-group renders
@@ -88,8 +112,8 @@ def _scan_genre_block(soup) -> tuple[list[tuple[str, str]], int, int, int | None
     group = next(
         (
             g
-            for g in soup.select("li.series-group")
-            if (s := g.find("strong")) and s.get_text(strip=True).startswith("Genre")
+            for g in doc.xpath(_XP_SERIES_GROUPS)
+            if (s := _first(g, _XP_GROUP_STRONG)) is not None and _stripped_text(s).startswith("Genre")
         ),
         None,
     )
@@ -98,19 +122,19 @@ def _scan_genre_block(soup) -> tuple[list[tuple[str, str]], int, int, int | None
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     raw_anchors = 0
-    for a in group.select("a[href^='/genre/']"):
+    for a in group.xpath(_XP_GENRE_ANCHORS):
         raw_anchors += 1
-        label = a.get_text(strip=True)
-        key = normalize_genre_key(str(a.get("href", ""))) or normalize_genre_key(label)
+        label = _stripped_text(a)
+        key = normalize_genre_key(str(a.get("href", "") or "")) or normalize_genre_key(label)
         if key and key not in seen:
             seen.add(key)
             out.append((key, label))
     # Hidden genres sit inside a nested span.extra-items, so a direct-child
     # anchor count (recursive=False) is exactly the visible-before-truncation
     # count -- the same reasoning aniworld uses for its mid-list button.
-    visible = sum(1 for a in group.find_all("a", recursive=False) if str(a.get("href", "")).startswith("/genre/"))
+    visible = sum(1 for a in group.xpath(_XP_DIRECT_ANCHORS) if str(a.get("href", "") or "").startswith("/genre/"))
     hidden: int | None = None
-    button = group.find("button", class_="toggle-more")
+    button = _first(group, _XP_TOGGLE_MORE)
     if button is not None:
         try:
             hidden = int(str(button.get("data-count")))
@@ -119,7 +143,7 @@ def _scan_genre_block(soup) -> tuple[list[tuple[str, str]], int, int, int | None
     return out, visible, raw_anchors, hidden
 
 
-def extract_genres(soup) -> list[tuple[str, str]]:
+def extract_genres(doc) -> list[tuple[str, str]]:
     """Return [(key, label), ...] for every genre on a series page.
 
     Hidden genres live in a nested ``span.extra-items d-none`` rather than
@@ -127,17 +151,17 @@ def extract_genres(soup) -> list[tuple[str, str]]:
     still present in the HTML of a single GET, so one selector reaches all of
     them without needing to look inside the span specially.
     """
-    return _scan_genre_block(soup)[0]
+    return _scan_genre_block(doc)[0]
 
 
-def _hidden_genre_count(soup) -> int | None:
+def _hidden_genre_count(doc) -> int | None:
     """How many genres the page admits to hiding, or None if it says nothing.
 
     A free tripwire: the site tells us the number (``data-count`` on the
     "& N mehr" button), so a markup change that starts costing us genres
     shows up as a warning instead of silently smaller numbers.
     """
-    return _scan_genre_block(soup)[3]
+    return _scan_genre_block(doc)[3]
 
 
 def _check_truncation(slug: str, visible: int, raw_anchors: int, hidden: int | None) -> None:
@@ -145,7 +169,7 @@ def _check_truncation(slug: str, visible: int, raw_anchors: int, hidden: int | N
 
     Takes the counts _scan_genre_block already computed rather than
     re-scanning the page: the worker loop needs both the genres and this
-    check from the same page, and a second soup.select() pass over the same
+    check from the same page, and a second select() pass over the same
     handful of elements would undo the "one pass" property that function
     documents.
     """
@@ -290,13 +314,19 @@ async def _scrape_async(site_url: str | None, data: dict, state: dict, *, refetc
                 try:
                     resp = await scraper._get(client, url)  # noqa: SLF001
                     with scraper._profiler.phase("parse"):  # noqa: SLF001
-                        soup = make_soup(resp.text)
-                        genres, visible, raw_anchors, hidden = _scan_genre_block(soup)
-                        _check_truncation(slug, visible, raw_anchors, hidden)
-                        title = _extract_title(soup) or slug
+                        doc = make_doc(resp.text)
+                        if doc is not None:
+                            genres, visible, raw_anchors, hidden = _scan_genre_block(doc)
+                            _check_truncation(slug, visible, raw_anchors, hidden)
+                            title = _extract_title(doc) or slug
                     if not genres:
+                        # A body that is not markup lands here too. make_soup
+                        # used to hand back an empty tree for it, which read as
+                        # "this page has no genres"; make_doc says None instead.
+                        # Kept on the empty branch rather than promoted to a
+                        # failure, so the tally means what it always meant.
                         state["empty"] += 1
-                    if not state["logged_out"] and not _is_logged_in(soup):
+                    if not state["logged_out"] and doc is not None and not _is_logged_in(doc):
                         state["logged_out"] = True
                         logger.warning("Session expired mid-run; genres still parse anonymously")
                 except Exception as exc:  # noqa: BLE001 - one bad page must never end the run

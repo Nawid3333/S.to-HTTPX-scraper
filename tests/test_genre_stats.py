@@ -30,7 +30,7 @@ from src.genre_stats import (  # noqa: E402
     normalize_genre_key,
     save_genres,
 )
-from src.scraper import _extract_title, make_soup  # noqa: E402
+from src.scraper import _extract_title, make_doc  # noqa: E402
 
 PAGE_DIR = Path(__file__).resolve().parent / "fixtures" / "pages"
 
@@ -39,11 +39,11 @@ def load_page(name):
     path = PAGE_DIR / f"series__{name}.html.gz"
     if not path.exists():
         return None
-    return make_soup(gzip.decompress(path.read_bytes()).decode("utf-8"))
+    return make_doc(gzip.decompress(path.read_bytes()).decode("utf-8"))
 
 
-def keys_of(soup):
-    return [key for key, _ in extract_genres(soup)]
+def keys_of(doc):
+    return [key for key, _ in extract_genres(doc)]
 
 
 def series_group_page(genre_html: str, *, land_html: str = '<a href="/land/usa" class="link-light">USA</a>'):
@@ -63,7 +63,7 @@ def series_group_page(genre_html: str, *, land_html: str = '<a href="/land/usa" 
     </ul>
     </body></html>
     """
-    return make_soup(html)
+    return make_doc(html)
 
 
 def series_entry(total, watched, slug):
@@ -87,32 +87,32 @@ class TestHiddenGenresAreCaptured(unittest.TestCase):
     """The single most likely way this feature ships subtly wrong."""
 
     def test_moon_knight_yields_every_genre_including_the_hidden_three(self):
-        soup = load_page("moon-knight")
-        if soup is None:
+        doc = load_page("moon-knight")
+        if doc is None:
             self.skipTest("moon-knight fixture not captured")
-        keys = keys_of(soup)
+        keys = keys_of(doc)
         self.assertEqual(len(keys), 6, f"expected 6 genres, got {keys}")
         self.assertIn("horror", keys, "a genre inside span.extra-items was dropped")
 
     def test_bastions_and_spuk_yield_their_hidden_genre(self):
         for name in ("bastions", "spuk-unterm-riesenrad"):
-            soup = load_page(name)
-            if soup is None:
+            doc = load_page(name)
+            if doc is None:
                 continue
             with self.subTest(page=name):
-                self.assertEqual(len(keys_of(soup)), 4)
+                self.assertEqual(len(keys_of(doc)), 4)
 
     def test_parsed_count_matches_what_the_page_says_it_hides(self):
         """The page announces the hidden count (data-count), so it can check
         our work."""
         for name in ("moon-knight", "bastions", "spuk-unterm-riesenrad"):
-            soup = load_page(name)
-            if soup is None:
+            doc = load_page(name)
+            if doc is None:
                 continue
-            hidden = genre_stats._hidden_genre_count(soup)
+            hidden = genre_stats._hidden_genre_count(doc)
             if hidden is None:
                 continue
-            _, visible, raw_anchors, _ = genre_stats._scan_genre_block(soup)
+            _, visible, raw_anchors, _ = genre_stats._scan_genre_block(doc)
             with self.subTest(page=name):
                 self.assertEqual(raw_anchors, visible + hidden)
 
@@ -120,8 +120,8 @@ class TestHiddenGenresAreCaptured(unittest.TestCase):
         """Fixtures sample the site; they do not specify it."""
         counts = {}
         for path in sorted(PAGE_DIR.glob("series__*.html.gz")):
-            soup = make_soup(gzip.decompress(path.read_bytes()).decode("utf-8"))
-            genres = extract_genres(soup)
+            doc = make_doc(gzip.decompress(path.read_bytes()).decode("utf-8"))
+            genres = extract_genres(doc)
             if genres:
                 counts[path.name] = len(genres)
         self.assertTrue(counts, "no fixture produced genres")
@@ -133,28 +133,28 @@ class TestLandBlockNeverLeaks(unittest.TestCase):
     "Genre:" on every real page -- both must be scoped, not just skimmed."""
 
     def test_a_country_next_to_the_genre_block_is_never_returned(self):
-        soup = series_group_page('<a href="/genre/krimi" class="link-light">Krimi</a>')
-        self.assertEqual(keys_of(soup), ["krimi"])
+        doc = series_group_page('<a href="/genre/krimi" class="link-light">Krimi</a>')
+        self.assertEqual(keys_of(doc), ["krimi"])
 
     def test_multiple_countries_still_never_leak(self):
-        soup = series_group_page(
+        doc = series_group_page(
             '<a href="/genre/action" class="link-light">Action</a>',
             land_html=(
                 '<a href="/land/grossbritannien" class="link-light">Großbritannien</a>,'
                 '<a href="/land/usa" class="link-light">USA</a>'
             ),
         )
-        self.assertEqual(keys_of(soup), ["action"])
+        self.assertEqual(keys_of(doc), ["action"])
 
     def test_a_page_with_only_a_land_block_returns_no_genres(self):
-        soup = make_soup(
+        doc = make_doc(
             """<html><body><ul>
                  <li class="series-group"><strong>Land:</strong>
                    <a href="/land/usa" class="link-light">USA</a>
                  </li>
                </ul></body></html>"""
         )
-        self.assertEqual(extract_genres(soup), [])
+        self.assertEqual(extract_genres(doc), [])
 
 
 class TestSeriesTitles(unittest.TestCase):
@@ -162,15 +162,15 @@ class TestSeriesTitles(unittest.TestCase):
 
     def test_title_is_read_from_the_heading_not_the_url_slug(self):
         for name, expected in (("moon-knight", "Moon Knight"), ("tatort", "Tatort")):
-            soup = load_page(name)
-            if soup is None:
+            doc = load_page(name)
+            if doc is None:
                 self.skipTest(f"{name} fixture not captured")
             with self.subTest(page=name):
-                self.assertEqual(_extract_title(soup), expected)
+                self.assertEqual(_extract_title(doc), expected)
 
     def test_a_page_with_no_usable_heading_falls_back_to_the_slug(self):
-        soup = make_soup("<html><body><p>no heading here</p></body></html>")
-        self.assertIsNone(_extract_title(soup))
+        doc = make_doc("<html><body><p>no heading here</p></body></html>")
+        self.assertIsNone(_extract_title(doc))
 
 
 class TestGenreIdentity(unittest.TestCase):

@@ -20,7 +20,6 @@ from urllib.parse import urlparse
 import httpx
 import lxml.etree
 import lxml.html
-from bs4 import BeautifulSoup
 
 from config.config import (  # pylint: disable=import-error,no-name-in-module
     CHECKPOINT_EVERY,
@@ -35,35 +34,19 @@ from config.config import (  # pylint: disable=import-error,no-name-in-module
 )
 from src.atomic_io import atomic_write_json
 from src.slug import slug_key, slug_keys
+from src.term import cinput as input
+from src.term import cprint as print
 
 logger = logging.getLogger(__name__)
 
 
 # ── HTML parsing ────────────────────────────────────────────────────────────
-# lxml parses these pages roughly 1.4x faster than the stdlib parser, and the
-# golden fixtures in tests/ confirm it produces identical output on every
-# captured real page. The fallback keeps the scraper working on a machine
-# where lxml was never installed, at the old speed.
-try:
-    import lxml  # noqa: F401
-
-    _HTML_PARSER = "lxml"
-except ImportError:  # pragma: no cover - depends on the install
-    _HTML_PARSER = "html.parser"
-
-
-def make_soup(html: str) -> BeautifulSoup:
-    """Parse a page with the fastest parser available.
-
-    Every BeautifulSoup parse in this module goes through here so the choice
-    is made in exactly one place -- a parser swap must never be able to apply
-    to some pages and not others.
-
-    Season pages are the exception and no longer come through here: they are
-    the hot path and go straight to lxml instead. Everything else (series
-    pages, the catalogue, account pages, login) still uses this.
-    """
-    return BeautifulSoup(html, _HTML_PARSER)
+# Every page this module reads is parsed by make_doc, below. BeautifulSoup
+# used to sit alongside it for series, catalogue and account pages; it was
+# removed once the last of those moved across, so there is now one parser and
+# one tree type rather than two of each. lxml was already a hard requirement
+# (see pyproject), so the old html.parser fallback could never fire and went
+# with it.
 
 
 # ── Transient-failure handling ──────────────────────────────────────────────
@@ -366,7 +349,7 @@ def _find_vanished_renames(vanished_entries, new_entries, threshold: float = 0.7
 
 
 def _attr_str(value: object) -> str | None:
-    """Return a BeautifulSoup attribute value only if it is a plain string."""
+    """Return an attribute value only if it is a plain string."""
     return value if isinstance(value, str) else None
 
 
@@ -416,7 +399,7 @@ def _build_full_url(base_url, path):
     return base_url.rstrip("/") + path
 
 
-def _extract_season_links(soup: BeautifulSoup, series_slug: str, base_url: str) -> list[tuple[str, str]]:
+def _extract_season_links(doc, series_slug: str, base_url: str) -> list[tuple[str, str]]:
     """Extract season numbers and URLs from the #season-nav element.
 
     Uses data-season-pill attributes first, then falls back to href patterns.
@@ -425,7 +408,7 @@ def _extract_season_links(soup: BeautifulSoup, series_slug: str, base_url: str) 
     # Primary: data-season-pill attributes from #season-nav
     seasons = []
     seen = set()
-    for link in soup.select("#season-nav a[data-season-pill]"):
+    for link in doc.xpath(_XP_SEASON_NAV_PILLS):
         season_num = link.get("data-season-pill", "")
         if season_num is not None and season_num != "" and season_num not in seen:
             seen.add(season_num)
@@ -437,7 +420,7 @@ def _extract_season_links(soup: BeautifulSoup, series_slug: str, base_url: str) 
 
     # Fallback: href pattern /serie/{slug}/staffel-{num}
     staffel_pattern = re.compile(rf"/serie/{re.escape(series_slug)}/staffel-(\d+)", re.IGNORECASE)
-    for a_tag in soup.find_all("a", href=True):
+    for a_tag in doc.xpath(_XP_ANY_LINK):
         href = _attr_str(a_tag.get("href"))
         if not href:
             continue
@@ -452,8 +435,8 @@ def _extract_season_links(soup: BeautifulSoup, series_slug: str, base_url: str) 
 
     # bs.to-style fallback: #seasons a
     links = []
-    for a in soup.select("#seasons a"):
-        label = a.get_text(strip=True)
+    for a in doc.xpath(_XP_SEASONS_LINKS):
+        label = _stripped_text(a)
         href = _attr_str(a.get("href")) or ""
         if not label or not href:
             continue
@@ -492,9 +475,9 @@ _ERROR_TITLE_RE = re.compile(
 _SERVER_ERROR_CODES = {"429", "500", "502", "503", "504"}
 
 
-def _is_logged_in(soup: BeautifulSoup) -> bool:
+def _is_logged_in(doc) -> bool:
     """Check if the page indicates a logged-in session."""
-    return soup.select_one("form[action='/logout']") is not None
+    return _first(doc, _XP_LOGGED_IN) is not None
 
 
 # ── Language detection ────────────────────────────────────────────────────
@@ -581,12 +564,66 @@ def _account_name_from_hrefs(hrefs) -> str | None:
     return None
 
 
-def _account_name_from_soup(soup: BeautifulSoup) -> str | None:
+def _account_name_from_doc(doc) -> str | None:
     """Read the logged-in account name off a series/catalogue page."""
-    return _account_name_from_hrefs(a.get("href") for a in soup.find_all("a", href=True))
+    return _account_name_from_hrefs(a.get("href") for a in doc.xpath(_XP_ANY_LINK))
 
 
 _XP_FLAGGY_CELL = ".//svg[contains(@class, 'flag')] | .//use[contains(@href, 'flag')]"
+
+
+# ── Series-page selectors, as XPath ─────────────────────────────────────────
+#
+# Literal translations of the CSS the series-page readers used to hand to
+# BeautifulSoup. One series page cost ~16ms to soup and interrogate against
+# ~3ms through lxml, paid once per series on the event loop where it blocks
+# every concurrent fetch the pool has in flight. Verified output-for-output
+# against the BeautifulSoup versions on every captured page before the switch.
+_XP_SEASON_PILL = ".//a[@data-season-pill]"
+_XP_STAFFEL_HREF = ".//a[contains(@href, '/staffel-')]"
+_XP_SEASON_NAV_PILLS = ".//*[@id='season-nav']//a[@data-season-pill]"
+_XP_SEASONS_LINKS = ".//*[@id='seasons']//a"
+_XP_SEASONS_LI_LINKS = ".//*[@id='seasons']//li//a"
+_XP_ANY_SEASON_LINK = ".//a[contains(@href, 'staffel-') or contains(@href, 'season-')]"
+_XP_H1_FW_BOLD = f".//h1[{_hc('fw-bold')}]"
+_XP_DESCRIPTION_TEXT = f".//span[{_hc('description-text')}]"
+_XP_ANY_LINK = ".//a[@href]"
+# The desktop container is preferred so the duplicated mobile buttons are not
+# read twice; `.d-none.d-md-flex .js-action-btn` is one element carrying both
+# classes, then any descendant action button.
+_XP_ACTION_BTN_DESKTOP = f".//*[{_hc('d-none')}][{_hc('d-md-flex')}]//*[{_hc('js-action-btn')}]"
+_XP_ACTION_BTN_ANY = f".//*[{_hc('js-action-btn')}]"
+# bs4 hands back `class` already split into a list; lxml hands back the raw
+# string. Substring-testing that string would match btn-glass-primary-foo, so
+# it is split on whitespace exactly the way the CSS class model defines.
+_XP_SERIES_ITEM_ANCESTOR = f"ancestor::li[{_hc('series-item')}][1]"
+_XP_PAGINATION_NEXT = f".//ul[{_hc('pagination')}]//a[@rel='next']"
+
+
+def _first(doc, xpath):
+    """First node matching `xpath`, or None -- lxml's answer to select_one."""
+    found = doc.xpath(xpath)
+    return found[0] if found else None
+
+
+def _spaced_text(el) -> str:
+    """lxml equivalent of BeautifulSoup's get_text(" ", strip=True).
+
+    The separator is the point: joining with nothing glues "Harry
+    Potter<small>Specials</small>" into one word, which then survives every
+    later cleanup and is stored as the series title.
+    """
+    return " ".join(t.strip() for t in el.itertext() if t.strip())
+
+
+def _class_tokens(el) -> list[str]:
+    """The element's class attribute as the token list bs4 used to return.
+
+    Split rather than substring-tested: `"btn-glass-primary" in class_string`
+    would also match `btn-glass-primary-lg`, which is the near-miss that turns
+    into a wrong subscription flag rather than an error.
+    """
+    return str(el.get("class") or "").split()
 
 
 def _stripped_text(el) -> str:
@@ -691,14 +728,14 @@ def _parse_episodes(html: str) -> list[dict] | None:
         failure -- storing 0 there corrupts the index and shows up later as
         a false "this series lost all its episodes" mismatch.
     """
-    doc = _build_doc(html)
+    doc = make_doc(html)
     if doc is None:
         # An empty or non-markup body is a failed fetch, not an empty season.
         return None
     return _parse_episodes_from_doc(doc)
 
 
-def _build_doc(html: str):
+def make_doc(html: str):
     """Build the lxml tree for a season page, or None if the body is not markup.
 
     Split out so a caller can run more than one check against a single parse:
@@ -731,7 +768,7 @@ def parse_season_page(html: str, account_name: str | None = None) -> tuple[bool,
     episodes for None first, so it surfaces as the parse failure it is
     rather than as a session expiry.
     """
-    doc = _build_doc(html)
+    doc = make_doc(html)
     if doc is None:
         return False, None
     logged_in = bool(doc.xpath(_XP_LOGGED_IN))
@@ -832,7 +869,7 @@ def _parse_episodes_from_doc(doc) -> list[dict] | None:
     return episodes
 
 
-def _check_error_page(soup: BeautifulSoup) -> str | None:
+def _check_error_page(doc) -> str | None:
     """Detect HTTP error pages (404, 502, etc.) returned as HTML.
 
     Returns an error string like '404' if an error page is detected, None otherwise.
@@ -840,25 +877,24 @@ def _check_error_page(soup: BeautifulSoup) -> str | None:
     real error pages from series that happen to contain numbers in their name.
     """
     # If the page has series content (season nav pills), it's a real series page
-    if soup.select_one("a[data-season-pill]") or soup.select_one('a[href*="/staffel-"]'):
+    if _first(doc, _XP_SEASON_PILL) is not None or _first(doc, _XP_STAFFEL_HREF) is not None:
         return None
     # Check <title> for error patterns
-    title_tag = soup.find("title")
-    if title_tag:
-        title_text = title_tag.get_text(strip=True)
-        m = _ERROR_TITLE_RE.search(title_text)
+    title_tag = _first(doc, ".//title")
+    if title_tag is not None:
+        m = _ERROR_TITLE_RE.search(_stripped_text(title_tag))
         if m:
             code = m.group("code") or m.group("code2")
             return code
     # Check for <h2>404</h2> (exact match, safe from series names)
-    h2_tag = soup.find("h2")
-    if h2_tag and h2_tag.get_text(strip=True).isdigit():
-        code = h2_tag.get_text(strip=True)
-        if len(code) == 3:
+    h2_tag = _first(doc, ".//h2")
+    if h2_tag is not None:
+        code = _stripped_text(h2_tag)
+        if code.isdigit() and len(code) == 3:
             return code
     # s.to-specific fallback: <p> containing "nicht gefunden" on an otherwise empty page
-    p_tag = soup.find("p")
-    if p_tag and "nicht gefunden" in p_tag.get_text(strip=True).lower():
+    p_tag = _first(doc, ".//p")
+    if p_tag is not None and "nicht gefunden" in _stripped_text(p_tag).lower():
         return "404"
     return None
 
@@ -866,20 +902,24 @@ def _check_error_page(soup: BeautifulSoup) -> str | None:
 def _heading_text(el) -> str:
     """Return the flattened, normalized text of a heading element.
 
-    Uses a separator-joined get_text() so inline sub-elements (e.g. "Harry
+    Uses a separator-joined flatten so inline sub-elements (e.g. "Harry
     Potter<small>Specials</small>") don't glue themselves to the main text.
-    Does not mutate the parse tree -- safe to call on a soup shared with
+    Does not mutate the parse tree -- safe to call on a tree shared with
     other extractors.
+
+    Tests `el is None` rather than `not el`: an lxml element with no child
+    elements is falsy, so a plain <h1>Title</h1> -- the overwhelmingly common
+    case -- would take the empty branch and drop every title on the site.
     """
-    if not el:
+    if el is None:
         return ""
-    text = " ".join(el.get_text(" ", strip=True).split())
+    text = " ".join(_spaced_text(el).split())
     text = re.sub(r"\s*(?:Staffel|Season|St\.?)\s*\d+.*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*Specials\s*$", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 
-def _extract_title(soup: BeautifulSoup) -> str | None:
+def _extract_title(doc) -> str | None:
     """Extract series title from the page.
 
     Tries site-specific heading(s) first, then falls back to generic headings.
@@ -887,42 +927,40 @@ def _extract_title(soup: BeautifulSoup) -> str | None:
     ensures inline tags like <small> do not glue themselves to the main text.
     """
     # s.to preferred heading
-    for selector in ("h1.fw-bold",):
-        el = soup.select_one(selector)
-        text = _heading_text(el)
+    for xpath in (_XP_H1_FW_BOLD,):
+        text = _heading_text(_first(doc, xpath))
         if text:
             return text
 
     # Fallback headings
     for tag in ("h2", "h1"):
-        el = soup.find(tag)
-        text = _heading_text(el)
+        text = _heading_text(_first(doc, f".//{tag}"))
         if text:
             return text
     return None
 
 
-def _count_seasons_from_html(soup: BeautifulSoup) -> int:
+def _count_seasons_from_html(doc) -> int:
     """Return number of distinct seasons found on an s.to series page."""
-    season_links = soup.select("#seasons li a")
+    season_links = doc.xpath(_XP_SEASONS_LI_LINKS)
     if not season_links:
         # Fallback: look for staffel-N or season-N links anywhere in the page.
-        season_links = soup.select("a[href*='staffel-'], a[href*='season-']")
+        season_links = doc.xpath(_XP_ANY_SEASON_LINK)
     labels = set()
     for a in season_links:
-        href = str(a.get("href", ""))
+        href = str(a.get("href", "") or "")
         m = re.search(r"(?:^|/)(?:staffel|season)-(\d+)", href, re.IGNORECASE)
         if m:
             labels.add(int(m.group(1)))
             continue
-        text = a.get_text(strip=True)
+        text = _stripped_text(a)
         m = re.search(r"(?:staffel|season|st\.?)\s*(\d+)", text, re.IGNORECASE)
         if m:
             labels.add(int(m.group(1)))
     return len(labels)
 
 
-def _detect_subscription_status(soup: BeautifulSoup) -> tuple[bool | None, bool | None]:
+def _detect_subscription_status(doc) -> tuple[bool | None, bool | None]:
     """Detect subscription and watchlist status from a series page.
 
     Looks for .js-action-btn buttons with data-type 'favorite' (subscribed)
@@ -932,11 +970,11 @@ def _detect_subscription_status(soup: BeautifulSoup) -> tuple[bool | None, bool 
     Returns (subscribed, watchlist) — None if button not found.
     """
     # Verify logged-in state
-    if not soup.select_one("form[action='/logout']"):
+    if _first(doc, _XP_LOGGED_IN) is None:
         return (None, None)
 
     # Prefer desktop-only container to avoid duplicate mobile buttons
-    buttons = soup.select(".d-none.d-md-flex .js-action-btn") or soup.select(".js-action-btn")
+    buttons = doc.xpath(_XP_ACTION_BTN_DESKTOP) or doc.xpath(_XP_ACTION_BTN_ANY)
     if not buttons:
         return (None, None)
 
@@ -944,7 +982,7 @@ def _detect_subscription_status(soup: BeautifulSoup) -> tuple[bool | None, bool 
     watchlist = None
     for button in buttons:
         data_type = button.get("data-type", "")
-        is_active = "btn-glass-primary" in (button.get("class") or []) or button.get("data-active") == "1"
+        is_active = "btn-glass-primary" in _class_tokens(button) or button.get("data-active") == "1"
         if data_type == "favorite":
             subscribed = bool(is_active)
         elif data_type == "watchlater":
@@ -978,17 +1016,17 @@ def _extract_alt_titles(data_search: str, main_title: str) -> list[str]:
     return alt_titles
 
 
-def _extract_description_alt_title(soup: BeautifulSoup, main_title: str) -> list[str]:
+def _extract_description_alt_title(doc, main_title: str) -> list[str]:
     """Extract an alternative title from the series description block.
 
     s.to/serienstream.to puts the original English title at the start of the
     synopsis inside square brackets, e.g.:
         [My Life with the Walter Boys] Jackie Howards Leben ...
     """
-    desc_el = soup.select_one("span.description-text")
-    if not desc_el:
+    desc_el = _first(doc, _XP_DESCRIPTION_TEXT)
+    if desc_el is None:
         return []
-    text = desc_el.get_text(strip=True)
+    text = _stripped_text(desc_el)
     if not text:
         return []
     match = re.match(r"\[(.+?)\]\s*", text)
@@ -1257,14 +1295,14 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             title = entry.get("title", url.split("/")[-1])
             try:
                 resp = await client.get(url, follow_redirects=True)
-                soup = make_soup(resp.text)
-                error_code = _check_error_page(soup)
+                doc = make_doc(resp.text)
+                error_code = _check_error_page(doc) if doc is not None else "unparseable"
                 if error_code:
                     still_empty += 1
                     print(f"  ✓ {title}: still empty ({error_code} — ignored)")
                 else:
                     # Check if page actually has season content
-                    has_seasons = soup.select_one("a[data-season-pill]") or soup.select_one('a[href*="/staffel-"]')
+                    has_seasons = _first(doc, _XP_SEASON_PILL) is not None or _first(doc, _XP_STAFFEL_HREF) is not None
                     if has_seasons:
                         now_available += 1
                         print(f"  ⚠ {title}: now available! Consider removing from .ignored_series.json")
@@ -1488,12 +1526,12 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             await client.aclose()
             raise RuntimeError(f"Login page returned status {resp.status_code}")
 
-        soup = make_soup(resp.text)
+        doc = make_doc(resp.text)
 
         token = ""
         for name in ("_token", "security_token"):
-            token_input = soup.find("input", {"name": name})
-            if token_input:
+            token_input = _first(doc, f".//input[@name='{name}']") if doc is not None else None
+            if token_input is not None:
                 value = _attr_str(token_input.get("value"))
                 if value:
                     token = value
@@ -1526,8 +1564,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             await client.aclose()
             raise RuntimeError(f"Login verification fetch failed: {e}") from e
 
-        verify_soup = make_soup(verify_resp.text)
-        if not _is_logged_in(verify_soup):
+        verify_doc = make_doc(verify_resp.text)
+        if verify_doc is None or not _is_logged_in(verify_doc):
             await client.aclose()
             raise RuntimeError("Login failed — check credentials")
 
@@ -1651,13 +1689,16 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         }
         try:
             resp = await client.get(url, follow_redirects=True)
-            soup = make_soup(resp.text)
-            error_code = _check_error_page(soup)
+            doc = make_doc(resp.text)
+            if doc is None:
+                result["error"] = "error_page_unparseable"
+                return result
+            error_code = _check_error_page(doc)
             if error_code:
                 result["error"] = f"error_page_{error_code}"
                 return result
-            title = _extract_title(soup)
-            season_count = _count_seasons_from_html(soup)
+            title = _extract_title(doc)
+            season_count = _count_seasons_from_html(doc)
             result["reachable"] = True
             result["title"] = title
             result["season_count"] = season_count
@@ -1869,11 +1910,11 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
     async def _get_all_series(self, client: httpx.AsyncClient) -> list[dict]:
         """Fetch the full series catalogue from the active site."""
         resp = await self._get(client, _build_full_url(self.site_url, SERIES_LIST_PATH))
-        soup = make_soup(resp.text)
-        if not _is_logged_in(soup):
+        doc = make_doc(resp.text)
+        if doc is None or not _is_logged_in(doc):
             raise RuntimeError("Not logged in — cannot fetch series catalogue")
         series, seen_slugs = [], set()
-        for a in soup.find_all("a", href=True):
+        for a in doc.xpath(_XP_ANY_LINK):
             href = _attr_str(a.get("href"))
             if not href:
                 continue
@@ -1889,7 +1930,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 slug = m.group(1)
             if not slug:
                 continue
-            title = a.get_text(strip=True)
+            title = _stripped_text(a)
             if not title or title.lower().strip() in _UTILITY_PAGES:
                 continue
             # Two spellings of one slug (case, percent-encoding) are one
@@ -1903,8 +1944,8 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                 "link": f"/serie/{slug}",
                 "url": _build_full_url(self.site_url, f"/serie/{slug}"),
             }
-            parent_li = a.find_parent("li", class_="series-item")
-            if parent_li:
+            parent_li = _first(a, _XP_SERIES_ITEM_ANCESTOR)
+            if parent_li is not None:
                 data_search = _attr_str(parent_li.get("data-search"))
                 alt = _extract_alt_titles(data_search or "", title)
                 if alt:
@@ -1947,11 +1988,11 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                     logger.warning("Could not fetch %s: %s", url, e)
                     break
 
-                soup = make_soup(resp.text)
-                if not _is_logged_in(soup):
+                doc = make_doc(resp.text)
+                if doc is None or not _is_logged_in(doc):
                     raise RuntimeError(f"Not logged in — cannot fetch {label} page")
 
-                for link in soup.find_all("a", href=True):
+                for link in doc.xpath(_XP_ANY_LINK):
                     href = _attr_str(link.get("href"))
                     if not href:
                         continue
@@ -1962,7 +2003,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                     if slug_key(slug) in seen_slugs:
                         continue
                     seen_slugs.add(slug_key(slug))
-                    title = link.get_text(strip=True) or slug
+                    title = _stripped_text(link) or slug
                     item = {
                         "title": title,
                         "link": f"/serie/{slug}",
@@ -1973,12 +2014,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                     series_list.append(item)
 
                 # Check for pagination
-                has_next = False
-                pagination = soup.find("ul", class_="pagination")
-                if pagination:
-                    next_link = pagination.find("a", attrs={"rel": "next"})
-                    if next_link:
-                        has_next = True
+                has_next = _first(doc, _XP_PAGINATION_NEXT) is not None
 
                 if has_next:
                     page_num += 1
@@ -2070,10 +2106,19 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         except httpx.HTTPError as e:
             return self._error_result(info, str(e))
 
-        soup = make_soup(resp.text)
+        # One tree per series page, read seven ways below. This parse used to
+        # be a BeautifulSoup build and was the largest unmeasured cost in a
+        # run: the profiler wrapped the network and the season parse but not
+        # this, so it never showed up. It is ~3ms here against ~16ms as a
+        # soup, once per series, on the event loop that every concurrent
+        # fetch shares.
+        with self._profiler.phase("parse_series"):
+            doc = make_doc(resp.text)
+        if doc is None:
+            return self._error_result(info, "series page was not markup")
 
         # Detect error pages (404, 502, etc.) before parsing content
-        error_code = _check_error_page(soup)
+        error_code = _check_error_page(doc)
         if error_code:
             reason = f"{error_code} error page"
             if error_code in _SERVER_ERROR_CODES:
@@ -2082,7 +2127,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             return self._error_result(info, reason)
 
         # Verify still logged in
-        if not _is_logged_in(soup):
+        if not _is_logged_in(doc):
             # One shared session serves the whole run, so an expiry here would
             # otherwise fail every remaining series. Re-login once and retry
             # this page; only give up if the second look is still logged out.
@@ -2091,25 +2136,28 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
                     resp = await self._get(client, url)
                 except httpx.HTTPError as e:
                     return self._error_result(info, str(e))
-                soup = make_soup(resp.text)
-            if not _is_logged_in(soup):
+                with self._profiler.phase("parse_series"):
+                    retry_doc = make_doc(resp.text)
+                if retry_doc is not None:
+                    doc = retry_doc
+            if not _is_logged_in(doc):
                 logger.error("Session expired while scraping %s", url)
                 return self._error_result(info, "session expired — not logged in")
 
         # This page is proven logged in; use it to learn the account name that
         # the season pages below are then checked against.
-        self._remember_account_name(soup)
+        self._remember_account_name(doc)
 
-        title = _extract_title(soup) or info.get("title", slug)
+        title = _extract_title(doc) or info.get("title", slug)
         if title.lower().strip() in _UTILITY_PAGES:
             return self._error_result(info, "utility page")
 
         # Detect subscription/watchlist status from the main series page
-        subscribed, watchlist = _detect_subscription_status(soup)
+        subscribed, watchlist = _detect_subscription_status(doc)
 
         # Merge alt titles from the series list with the detail-page bracketed
         # alt title in the description block.
-        alt_titles = list(dict.fromkeys((info.get("alt_titles") or []) + _extract_description_alt_title(soup, title)))
+        alt_titles = list(dict.fromkeys((info.get("alt_titles") or []) + _extract_description_alt_title(doc, title)))
 
         scrape_url = info.get("scrape_url", info["url"])
         if scrape_url.startswith("http://") or scrape_url.startswith("https://"):
@@ -2118,7 +2166,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         else:
             season_base_url = self.site_url
 
-        season_links = _extract_season_links(soup, slug, season_base_url)
+        season_links = _extract_season_links(doc, slug, season_base_url)
         if not season_links:
             return self._error_result(info, "no seasons found")
 
@@ -2233,7 +2281,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     # ── Worker ──────────────────────────────────────────────────────────────
 
-    def _remember_account_name(self, soup) -> None:
+    def _remember_account_name(self, doc) -> None:
         """Learn the account name from a page already proven to be logged in.
 
         The series page is checked for the logout marker before this runs, so
@@ -2242,7 +2290,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         check follows a rename on its own.
         """
         if self._account_name is None:
-            name = _account_name_from_soup(soup)
+            name = _account_name_from_doc(doc)
             if name:
                 self._account_name = name
                 logger.debug("Account name for season-page checks: %s", name)

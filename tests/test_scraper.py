@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bs4 import BeautifulSoup  # noqa: E402
+import lxml.html  # noqa: E402
 
 from config.config import configure_console  # noqa: E402
 from src.atomic_io import atomic_write_json  # noqa: E402
@@ -30,13 +30,16 @@ from src.index_manager import (  # noqa: E402
 from src.scraper import (  # noqa: E402
     SToScraper,
     _extract_title,
+    _first,
     _heading_text,
     _parse_episodes,
+    make_doc,
 )
 
 
-def soup(html: str) -> BeautifulSoup:
-    return BeautifulSoup(html, "html.parser")
+def tree_repr(doc) -> str:
+    """Serialise a tree so a test can prove a reader did not edit it."""
+    return lxml.html.tostring(doc, encoding="unicode")
 
 
 class TempFileCase(unittest.TestCase):
@@ -119,31 +122,38 @@ class TestAtomicWriteJson(TempFileCase):
             self.assertEqual(json.load(f), {"n": 2})
 
 
-# ==================== title extraction must not mutate soup ====================
-# Parse helpers take a pre-parsed soup, shared across extractors on one page --
-# these two land together because the non-mutation fix is what makes that
-# sharing safe.
+# ============= title extraction must not mutate the shared tree ==============
+# Parse helpers take a pre-parsed tree, shared across extractors on one page --
+# these land together because the non-mutation property is what makes that
+# sharing safe. It mattered when the readers were BeautifulSoup and it still
+# matters now they are lxml: one series page is read several ways.
 class TestExtractTitle(unittest.TestCase):
     def test_heading_text_does_not_mutate_tree(self):
         html = "<div id='x'><h1 class='fw-bold'>\n\t\tHarry Potter\n\t\t\t<small>Specials</small>\n</h1></div>"
-        s = soup(html)
-        before = str(s)
-        text = _heading_text(s.h1)
+        doc = make_doc(html)
+        before = tree_repr(doc)
+        text = _heading_text(_first(doc, ".//h1"))
         self.assertEqual(text, "Harry Potter")
-        self.assertEqual(str(s), before, "_heading_text must not edit the parse tree")
+        self.assertEqual(tree_repr(doc), before, "_heading_text must not edit the parse tree")
 
     def test_inline_tags_separated(self):
         html = "<div id='x'><h1 class='fw-bold'>\n\t\tHarry Potter\n\t\t\t<small>Specials</small>\n</h1></div>"
-        self.assertEqual(_extract_title(soup(html)), "Harry Potter")
+        self.assertEqual(_extract_title(make_doc(html)), "Harry Potter")
 
-    def test_shared_soup_not_mutated_by_extract_title(self):
-        """Once callers share one soup across extractors, _extract_title must
+    def test_a_heading_with_no_child_elements_still_yields_its_title(self):
+        """An lxml element with no children is falsy, so a plain <h1>Title</h1>
+        takes the empty branch under `not el` -- and that is the shape of every
+        real title on the site. Pins the `is None` test the readers use."""
+        self.assertEqual(_extract_title(make_doc("<h1 class='fw-bold'>Bleach</h1>")), "Bleach")
+
+    def test_shared_tree_not_mutated_by_extract_title(self):
+        """Once callers share one tree across extractors, _extract_title must
         not corrupt it for the extractors that run after."""
         html = "<div id='x'><h1 class='fw-bold'>Harry Potter<small>Specials</small></h1></div>"
-        s = soup(html)
-        before = str(s)
-        _extract_title(s)
-        self.assertEqual(str(s), before)
+        doc = make_doc(html)
+        before = tree_repr(doc)
+        _extract_title(doc)
+        self.assertEqual(tree_repr(doc), before)
 
 
 class TestParseEpisodesTakesHtml(unittest.TestCase):
