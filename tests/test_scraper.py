@@ -347,6 +347,8 @@ class TestDuplicateEpisodeNumbers(unittest.TestCase):
         </table>
         """
         eps = _parse_episodes(html)
+        self.assertIsNotNone(eps, "a well-formed table must parse")
+        assert eps is not None  # narrows for the type checker
         self.assertEqual([e["number"] for e in eps], [1, 2])
 
 
