@@ -22,8 +22,8 @@ import main  # noqa: E402
 class FakeIndex:
     """Minimal index manager stand-in."""
 
-    def __init__(self, entries):
-        self.series_index = {e["title"]: e for e in entries}
+    def __init__(self, entries: list[dict]) -> None:
+        self.series_index: dict[str, dict] = {e["title"]: e for e in entries}
 
 
 def _series(title, total, watched=0, url=None):

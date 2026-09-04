@@ -24,11 +24,8 @@ import sys
 import time
 from collections import Counter
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Protocol
 from urllib.parse import urlparse
-
-if TYPE_CHECKING:
-    from src.index_manager import IndexManager
 
 from config.config import (
     DATA_DIR,
@@ -65,6 +62,12 @@ from src.term import cinput as input
 from src.term import cprint as print
 
 
+class _IndexLike(Protocol):
+    """Minimal index manager surface used by suggestion helpers."""
+
+    series_index: dict[str, dict]
+
+
 def _extract_slug(entry):
     """Extract series slug from an index entry using link (primary) or url (fallback)."""
     # Both sibling scrapers guard this; S.to did not, so a malformed entry --
@@ -95,7 +98,7 @@ _file_handler = logging.handlers.RotatingFileHandler(
 )
 _file_handler.setFormatter(term.PlainFormatter(_LOG_FORMAT))
 
-_console_handler = logging.StreamHandler()
+_console_handler = logging.StreamHandler(sys.stdout)
 _console_handler.setFormatter(term.ColorFormatter(_LOG_FORMAT))
 
 logging.basicConfig(
@@ -1083,7 +1086,7 @@ def _prompt_genre_choice(choices: dict[str, str], *, allow_back: bool = True) ->
         print("✗ No genre matched. Please try again.")
 
 
-def _suggest_something_to_watch(idx_mgr: IndexManager | None = None):
+def _suggest_something_to_watch(idx_mgr: _IndexLike | None = None):
     """Suggest unwatched series from the index, optionally filtered by genre.
 
     Loads the genre index and presents a list of unwatched series. The user
@@ -1115,6 +1118,7 @@ def _suggest_something_to_watch(idx_mgr: IndexManager | None = None):
         return
 
     candidates = []
+    assert idx_mgr is not None
     for title, series in idx_mgr.series_index.items():
         if not isinstance(series, dict):
             continue

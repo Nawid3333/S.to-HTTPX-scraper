@@ -15,6 +15,7 @@ import signal
 import sys
 import threading
 import time
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 import httpx
@@ -1047,6 +1048,19 @@ class ScrapingPausedError(Exception):
     pass
 
 
+class _AsyncGetClient(Protocol):
+    """Subset of httpx.AsyncClient that only needs GET."""
+
+    async def get(self, *args: Any, **kwargs: Any) -> httpx.Response: ...
+
+
+class _AsyncClient(_AsyncGetClient, Protocol):
+    """Subset of httpx.AsyncClient used by login and account helpers."""
+
+    async def post(self, *args: Any, **kwargs: Any) -> httpx.Response: ...
+    async def aclose(self) -> None: ...
+
+
 # ── SToScraper (httpx) ─────────────────────────────────────────────────────
 
 
@@ -1275,7 +1289,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
     def get_ignored_slugs(self) -> set[str]:
         return slug_keys(self.get_series_slug_from_url(s.get("url", "")) for s in self.load_ignored_series())
 
-    async def _revalidate_ignored_series(self, client: httpx.AsyncClient):
+    async def _revalidate_ignored_series(self, client: _AsyncClient):
         """Re-check ignored series to see if they are still empty/404.
 
         Notification-only — does not auto-remove entries.  Prints a warning
@@ -1513,7 +1527,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         except OSError:
             pass
 
-    async def _login_client(self, client: httpx.AsyncClient, site_url: str, verify: bool = True) -> None:
+    async def _login_client(self, client: _AsyncClient, site_url: str, verify: bool = True) -> None:
         """Log in an existing httpx client to the active s.to site."""
         login_url = _build_full_url(site_url, LOGIN_PATH)
         try:
@@ -1672,7 +1686,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
     # Kept for backwards compatibility; prefer get_catalogue_info_for_site.
     async def verify_series_url(
         self,
-        client: httpx.AsyncClient,
+        client: _AsyncGetClient,
         url: str,
     ) -> dict:
         """Fetch a series URL and return current title/availability info.
@@ -1907,7 +1921,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
 
     # ── Async internals ─────────────────────────────────────────────────────
 
-    async def _get_all_series(self, client: httpx.AsyncClient) -> list[dict]:
+    async def _get_all_series(self, client: _AsyncGetClient) -> list[dict]:
         """Fetch the full series catalogue from the active site."""
         resp = await self._get(client, _build_full_url(self.site_url, SERIES_LIST_PATH))
         doc = make_doc(resp.text)
@@ -1955,7 +1969,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             series.append(entry)
         return series
 
-    async def _get_account_series(self, client: httpx.AsyncClient, source: str = "both") -> list[dict]:
+    async def _get_account_series(self, client: _AsyncClient, source: str = "both") -> list[dict]:
         """Fetch subscribed/watchlist series from account pages.
 
         Args:
@@ -2095,7 +2109,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             return_exceptions=True,
         )
 
-    async def _scrape_one_series(self, client: httpx.AsyncClient, info: dict) -> dict:
+    async def _scrape_one_series(self, client: _AsyncGetClient, info: dict) -> dict:
         """Scrape a single series: all seasons, episodes, subscription status."""
         t_start = time.perf_counter()
         url = info.get("scrape_url", info["url"])

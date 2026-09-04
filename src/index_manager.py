@@ -551,6 +551,8 @@ def show_changes(
 class IndexManager:
     """Manages persistent series index for s.to"""
 
+    series_index: dict[str, dict]
+
     def __init__(self, index_file):
         self.index_file = index_file
         self.series_index = {}
