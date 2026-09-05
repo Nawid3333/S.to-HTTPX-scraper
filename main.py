@@ -144,9 +144,9 @@ def _status_mark(value, width: int = 3) -> str:
 
 
 def print_header():
-    print("" + term.style("=" * 60, term._T.CYAN))
+    print("" + term.accent("=" * 60))
     print(term.step("  S.TO SERIES SCRAPER & INDEX MANAGER  (httpx)"))
-    print(term.style("=" * 60, term._T.CYAN))
+    print(term.accent("=" * 60))
 
 
 def _print_alert_block(entries, heading, advice):
