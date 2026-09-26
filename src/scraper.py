@@ -32,6 +32,7 @@ from config.config import (  # pylint: disable=import-error,no-name-in-module
     SEASON_CONCURRENCY,
     SERIES_INDEX_FILE,
     SITE_URLS,
+    USE_HTTP2,
 )
 from src import term
 from src.atomic_io import atomic_write_json
@@ -1594,7 +1595,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             second time to reach the same verdict.
         """
         client = httpx.AsyncClient(
-            http2=True,
+            http2=USE_HTTP2,
             headers={"User-Agent": UA},
             timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
             follow_redirects=True,
@@ -1615,7 +1616,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         """Return probe result for a single site URL."""
         try:
             client = httpx.AsyncClient(
-                http2=True,
+                http2=USE_HTTP2,
                 headers={"User-Agent": UA},
                 timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
                 follow_redirects=True,
@@ -1768,7 +1769,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             normalised_vanished.append((v_title, v_url))
 
         client = httpx.AsyncClient(
-            http2=True,
+            http2=USE_HTTP2,
             headers={"User-Agent": UA},
             timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
             follow_redirects=True,
