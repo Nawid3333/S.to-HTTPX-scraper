@@ -8,7 +8,7 @@ Uses **httpx** (no browser needed) with a multi-session architecture for fast, p
 
 ## Features
 
-- **Multi-session parallel scraping** — 10 concurrent httpx sessions by default (configurable in `config/config.py`)
+- **Multi-session parallel scraping** — 16 concurrent workers over HTTP/1.1 by default (configurable in `config/config.py` or via `STO_MAX_WORKERS`)
 - **Host probing** — checks all configured hosts before scraping, compares site series count with the local index, and writes a `mismatch_report.json` when differences or duplicate slugs are detected
 - **Duplicate slug detection** — finds duplicate slugs in the index and offers to delete them before continuing
 - **Smart per-series ETA estimation** — each series stores its own `avg_scrape_seconds` (exponential moving average for ETA prediction) and `scrape_duration_seconds` (actual duration of the most recent scrape) in the index. ETA is predicted by summing those per-series averages for the remaining work, then blended with the live session rate (historical 85%→45% as progress increases). Because the database is stable, per-series history is the best predictor.
@@ -47,8 +47,9 @@ Uses **httpx** (no browser needed) with a multi-session architecture for fast, p
   3.10 would very likely work — it is simply not tested, so it is not offered.
 - Dependencies: `httpx`, `lxml`, `h2`, `python-dotenv`
 
-`lxml` and `h2` are what make the scraper fast: pages parse ~4-6x quicker than with
-BeautifulSoup, and HTTP/2 lets one connection carry many requests.
+`lxml` is what keeps the scraper fast: pages parse ~4-6x quicker than with
+BeautifulSoup. `h2` is only needed if you switch HTTP/2 back on (`STO_HTTP2=1`);
+the default is parallel HTTP/1.1 connections, which this site serves ~30% faster.
 
 ## Installation
 
@@ -146,7 +147,7 @@ Built-in fallback hosts: `serienstream.to`, `186.2.175.5` (HTTP, no TLS).
 Scraping parallelism and request timeout can be adjusted in `config/config.py`:
 
 ```python
-NUM_WORKERS = 10  # Number of parallel httpx sessions
+NUM_WORKERS = 16  # Number of parallel workers
 HTTP_REQUEST_TIMEOUT = 20.0  # Seconds per request
 ```
 
@@ -156,9 +157,9 @@ All optional, with sensible defaults. Set them in `.env`.
 
 | Variable                 | Default | What it does                                                                                                                                                                  |
 | ------------------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `STO_MAX_WORKERS`        | `8`     | Concurrent scraping sessions. The default was measured on a representative sample of this catalogue, not guessed — higher is not faster, and past the peak it only adds load. |
+| `STO_MAX_WORKERS`        | `16`    | Concurrent scraping sessions. Measured, not guessed: over HTTP/1.1 throughput tops out at 16–24, where one CPU core is saturated; past 24 it falls. |
 | `STO_SEASON_CONCURRENCY` | `4`     | Season pages fetched at once per series. Total requests in flight is workers x this.                                                                                          |
-| `STO_HTTP2`              | `1`     | `0` (or `false`/`off`) trades one multiplexed HTTP/2 connection for parallel HTTP/1.1 ones. Change it only if `tests/throughput_sweep.py` shows HTTP/1.1 is faster.           |
+| `STO_HTTP2`              | `0`     | `1` (or `true`/`on`) switches to one multiplexed HTTP/2 connection. The default is parallel HTTP/1.1, measured +30% faster here because the site serves one connection only so fast. |
 | `STO_CHECKPOINT_EVERY`   | `50`    | Save resume state every N series.                                                                                                                                             |
 | `STO_PROFILE`            | unset   | Set to `1` to print where a run's time actually went (network vs parse vs disk).                                                                                              |
 | `STO_HOME` | unset | Where `.env`, `data/`, `logs/` and the default batch file live. Unset, that is this checkout. Set it when you install the package, so they do not land in site-packages. Must be a real environment variable — it cannot be set inside `.env`, because it is what locates that file. |
