@@ -175,6 +175,11 @@ DEFAULT_BATCH_FILE = os.path.abspath(DEFAULT_BATCH_FILE_PATH)
 # line: 19 Mbit/s at most, 19% of it. 16 is the smallest count within 5% of
 # the best, and more only adds CPU contention and time-to-first-byte.
 # Every setting returned identical data.
+#
+# Since season pages are parsed once instead of twice (1,000 series x2,
+# HTTP/1.1): 16 -> 125.0 pages/s at 78% CPU, 24 -> 125.4 at 88%, 32 -> 117.0
+# at 94%. The same shape about 43% higher, still one core, so 16 stays.
+#
 # Parsing stays on the event loop even so: moving it to a thread was measured
 # 2-2.7x SLOWER (see parse_season_html). Cheaper per page is the way forward.
 NUM_WORKERS = int(os.getenv("STO_MAX_WORKERS", "16"))
