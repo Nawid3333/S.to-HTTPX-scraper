@@ -498,6 +498,29 @@ def _extract_season_links(doc, series_slug: str, base_url: str) -> list[tuple[st
     return links
 
 
+# An episode link names its season: /serie/<slug>/staffel-2/episode-5, or
+# /filme/film-1 on a movies season.
+_EPISODE_HREF_RE = re.compile(r"(/staffel-\d+|/filme)/(?:episode|film)-\d+$")
+
+
+def _shown_season(doc, season_links: list[tuple[str, str]]) -> int | None:
+    """Which of `season_links` the series page's own episode table is, by index; None if unsure.
+
+    The series page embeds one season's full episode table. Which one is read
+    off the page's episode links, never assumed to be the first: on s.to 23 of
+    300 random series list season 0 first while the page shows season 1 (#4).
+    Every episode link on the page has to name the same season -- they did on
+    all 300 -- and exactly one season link has to end in it. Anything else is
+    None, and the caller fetches every season as it always did.
+    """
+    shown = {m.group(1) for href in doc.xpath(_XP_ANY_HREF) if (m := _EPISODE_HREF_RE.search(str(href)))}
+    if len(shown) != 1:
+        return None
+    fragment = shown.pop()
+    hits = [i for i, (_label, url) in enumerate(season_links) if url.rstrip("/").endswith(fragment)]
+    return hits[0] if len(hits) == 1 else None
+
+
 _SERIE_PATH_RE = re.compile(r"(/serie/[^/]+)")
 _SERIE_SLUG_RE = re.compile(r"^/serie/([^/?#]+)/?$")
 _UTILITY_PAGES = {
@@ -632,6 +655,7 @@ _XP_ANY_SEASON_LINK = ".//a[contains(@href, 'staffel-') or contains(@href, 'seas
 _XP_H1_FW_BOLD = f".//h1[{_hc('fw-bold')}]"
 _XP_DESCRIPTION_TEXT = f".//span[{_hc('description-text')}]"
 _XP_ANY_LINK = ".//a[@href]"
+_XP_ANY_HREF = ".//@href"
 # The desktop container is preferred so the duplicated mobile buttons are not
 # read twice; `.d-none.d-md-flex .js-action-btn` is one element carrying both
 # classes, then any descendant action button.
@@ -812,7 +836,16 @@ def parse_season_page(html: str, account_name: str | None = None) -> tuple[bool,
     episodes for None first, so it surfaces as the parse failure it is
     rather than as a session expiry.
     """
-    doc = make_doc(html)
+    return _parse_season_doc(make_doc(html), account_name)
+
+
+def _parse_season_doc(doc, account_name: str | None = None) -> tuple[bool, list[dict] | None]:
+    """The body of parse_season_page, over a tree the caller already built.
+
+    Split out so the series page, whose tree _scrape_one_series already has,
+    can be read as the season it embeds (see _shown_season) under exactly the
+    check every season page gets, without parsing it a second time.
+    """
     if doc is None:
         return False, None
     logged_in = bool(doc.xpath(_XP_LOGGED_IN))
@@ -2264,7 +2297,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
         has_episode_zero = False
         stale_ignored = []
 
-        season_pages = self._parse_season_pages(await self._fetch_season_pages(client, season_links))
+        season_pages = await self._read_season_pages(client, doc, season_links)
 
         # A season page that came back logged out yields a full, well-formed
         # episode table with every row unwatched, so it has to be caught here
@@ -2403,6 +2436,33 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             with self._profiler.phase("parse"):
                 parsed.append(parse_season_page(page, self._account_name))
         return parsed
+
+    async def _read_season_pages(self, client, doc, season_links) -> list:
+        """Every season, parsed as _parse_season_pages does, reading one of them off the series page.
+
+        The series page already carries one season's full episode table. Live,
+        on 300 random series (#4), it was identical to that season's own page,
+        episode for episode including the watched flags, 300 times out of 300,
+        and fetching that season again cost one of the 3.25 requests a series
+        took. Only the other seasons are fetched now.
+
+        The reused table passes the same login check as any season page, and
+        goes back in its own position, so the logged-out screen, the
+        first-failure-wins loop and the episode-0 handling see the list they
+        always did. Anything short of that -- no clear season (_shown_season),
+        no table, an empty one, or a table that fails the check -- fetches
+        every season as before. A re-login refetches all of them, this one
+        included.
+        """
+        shown = _shown_season(doc, season_links)
+        if shown is not None:
+            with self._profiler.phase("parse"):
+                logged_in, episodes = _parse_season_doc(doc, self._account_name)
+            if logged_in and episodes:
+                others = season_links[:shown] + season_links[shown + 1 :]
+                fetched = self._parse_season_pages(await self._fetch_season_pages(client, others))
+                return [*fetched[:shown], (logged_in, episodes), *fetched[shown:]]
+        return self._parse_season_pages(await self._fetch_season_pages(client, season_links))
 
     async def _reread_page(self, client, url):
         """Fetch `url` once more after a short jittered pause; its tree, or None.
