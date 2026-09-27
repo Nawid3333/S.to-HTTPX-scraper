@@ -196,6 +196,13 @@ SEASON_CONCURRENCY = int(os.getenv("STO_SEASON_CONCURRENCY", "4"))
 # back on; anything else, unset included, uses HTTP/1.1.
 USE_HTTP2 = os.getenv("STO_HTTP2", "").strip().lower() in ("1", "true", "yes", "on")
 
+# If the site starts pushing back on a full run -- "Site pushed back" or
+# "Session had expired; logged back in" in the log, or series failing --
+# the sweep's short samples did not cover that load. No code change is
+# needed to back off; set these in .env instead:
+#   STO_MAX_WORKERS=12              HTTP/1.1 with less load (82.5 pages/s above)
+#   STO_HTTP2=1 + STO_MAX_WORKERS=8  the previous defaults: one connection
+
 
 # Checkpoint frequency: serialize resume state every N completed series.
 # Large index (≈58 MB) → less frequent to avoid event-loop blocking.
