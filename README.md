@@ -131,7 +131,7 @@ STO_EMAIL=your@email.com
 STO_PASSWORD=yourpassword
 ```
 
-`.env` is used **only for credentials**. All other settings (site URLs, fallback domains, workers, timeout, batch file paths) live in `config/config.py`.
+`.env` holds your credentials and, optionally, the [Tuning](#tuning) variables below. Everything else (site URLs, fallback domains, timeout, batch file paths) lives in `config/config.py`.
 
 The default batch file is `series_urls.txt` next to `main.py`. To change it, edit `DEFAULT_BATCH_FILE` in `config/config.py`.
 
@@ -163,6 +163,22 @@ All optional, with sensible defaults. Set them in `.env`.
 | `STO_CHECKPOINT_EVERY`   | `50`    | Save resume state every N series.                                                                                                                                             |
 | `STO_PROFILE`            | unset   | Set to `1` to print where a run's time actually went (network vs parse vs disk).                                                                                              |
 | `STO_HOME` | unset | Where `.env`, `data/`, `logs/` and the default batch file live. Unset, that is this checkout. Set it when you install the package, so they do not land in site-packages. Must be a real environment variable — it cannot be set inside `.env`, because it is what locates that file. |
+
+**If a full run starts meeting push-back.** The defaults (HTTP/1.1, 16 workers) were measured on
+short samples with no push-back at all, but a full run keeps that load up for much longer. If the log
+shows `Site pushed back` or `Session had expired; logged back in`, or series start failing, back off in
+`.env`, no code change needed:
+
+```
+STO_MAX_WORKERS=12              # HTTP/1.1 with less load
+```
+
+or return to the previous defaults, one HTTP/2 connection with 8 workers:
+
+```
+STO_HTTP2=1
+STO_MAX_WORKERS=8
+```
 
 ## Usage
 
