@@ -155,41 +155,46 @@ DEFAULT_BATCH_FILE_PATH = os.path.join(PROJECT_HOME, "series_urls.txt")
 DEFAULT_BATCH_FILE = os.path.abspath(DEFAULT_BATCH_FILE_PATH)
 
 # ==================== SCRAPING SETTINGS ====================
-# Measured, not guessed: a worker sweep over a representative sample of
-# this catalogue (median 1 season, matching the real distribution) found
-# 34.5 pages/s at 8, vs 32.6 at 6 and 32.9 at 12. Four repeats in shuffled
-# order -- an earlier two-repeat run pointed at 12, but its curve was
-# non-monotonic with an 8.8 pages/s outlier, i.e. transient interference
-# rather than a real peak.
-# Re-measured after workers began sharing one logged-in session: the old
-# per-worker login both skewed the comparison and cost real throughput,
-# and it is what made this site start refusing logins during benchmarking.
+# Measured, not guessed -- on the owner's PC (~100 Mbit/s, ~20 ms to the
+# site), 150 series x2 repeats, tests/throughput_sweep.py, September 2026:
 #
-# Where the time actually goes, measured with the built-in PhaseProfiler
-# over 300 series x2 shuffled passes at these settings:
-#   network 98.1%   parse 1.8%   checkpoint <0.1%
-# Parsing costs 19% of ONE core across the run, so the scrape is bound by
-# the network and not by this process. Offloading parse off the event loop was
-# already measured 2-2.7x SLOWER (see parse_season_html), and the lxml parser
-# cut per-page parse time another 4.4x on top, so there is nothing left to
-# win here. Do not reopen this without a fresh profile showing otherwise.
-NUM_WORKERS = int(os.getenv("STO_MAX_WORKERS", "8"))
+#   HTTP/1.1, 4 seasons at once       HTTP/2 (one connection)
+#   workers  pages/s  CPU  ttfb50     pages/s  CPU  ttfb50
+#      4       50.1   46%    85ms       47.8   46%    90ms
+#      8       70.0   62%   109ms       66.0   62%   138ms
+#     12       82.5   76%   140ms       67.3   62%   214ms
+#     16       84.6   81%   178ms       65.8   61%   290ms
+#     24       87.2   86%   250ms       65.9   62%   458ms
+#
+# Follow-up, HTTP/1.1 only: 16 -> 87.4, 24 -> 87.8, 32 -> 79.9, 48 -> 75.2
+# pages/s, with CPU at 85-94% of one core. Past 24, throughput FALLS.
+#
+# So on HTTP/1.1 the limit is this process: one core, ~10 ms of CPU per
+# page (about 2-4 ms of it the parse of 180-210 KB of HTML, the rest the
+# httpx/TLS/asyncio stack). Not the site: zero 429/503 in 36 runs. Not the
+# line: 19 Mbit/s at most, 19% of it. 16 is the smallest count within 5% of
+# the best, and more only adds CPU contention and time-to-first-byte.
+# Every setting returned identical data.
+# Parsing stays on the event loop even so: moving it to a thread was measured
+# 2-2.7x SLOWER (see parse_season_html). Cheaper per page is the way forward.
+NUM_WORKERS = int(os.getenv("STO_MAX_WORKERS", "16"))
 
 # Season pages of one series are independent GETs. Fetching them one after
 # another made a series' scrape time scale linearly with its season count,
 # so they are fanned out this many at a time instead. Total requests in
 # flight is NUM_WORKERS * SEASON_CONCURRENCY -- raise either with care, and
 # only alongside the RateGuard that reacts to the site pushing back.
+# 8 measured worse than 4 at every worker count in the sweep above.
 SEASON_CONCURRENCY = int(os.getenv("STO_SEASON_CONCURRENCY", "4"))
 
 # HTTP/2 multiplexes every request over ONE connection per host; HTTP/1.1
 # opens up to NUM_WORKERS * SEASON_CONCURRENCY parallel connections instead.
-# Which one the site serves faster is the site's business, not ours, so it is
-# switchable for measuring (tests/throughput_sweep.py compares both).
-# STO_HTTP2=0 selects HTTP/1.1, and so do false/no/off: a value that reads
-# as "off" must not quietly keep HTTP/2. Anything else, unset included,
-# keeps HTTP/2.
-USE_HTTP2 = os.getenv("STO_HTTP2", "1").strip().lower() not in ("0", "false", "no", "off")
+# This site serves one connection only so fast: HTTP/2 stays flat at ~66
+# pages/s from 8 workers on while time-to-first-byte triples, and HTTP/1.1
+# at the same load reached 87 (+30%, in both repeats, with no push-back).
+# So HTTP/1.1 is the default. STO_HTTP2=1 (or true/yes/on) switches HTTP/2
+# back on; anything else, unset included, uses HTTP/1.1.
+USE_HTTP2 = os.getenv("STO_HTTP2", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 # Checkpoint frequency: serialize resume state every N completed series.
