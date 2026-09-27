@@ -39,7 +39,6 @@ from config.config import (  # pylint: disable=import-error,no-name-in-module
 from src import term
 from src.atomic_io import atomic_write_json
 from src.slug import slug_key, slug_keys
-from src.term import cinput as input
 from src.term import cprint as print
 
 logger = logging.getLogger(__name__)
@@ -1964,8 +1963,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             indexed,
             pct,
         )
-        answer = input("\nContinue with this scrape anyway? (y/n): ").strip().lower()
-        if answer != "y":
+        if not term.confirm("\nContinue with this scrape anyway? (y/n): "):
             print("  -> Scrape cancelled. The index was not touched.")
             logger.info("User cancelled scrape after short-catalogue warning.")
             return False
@@ -2995,8 +2993,7 @@ class SToScraper:  # pylint: disable=too-many-instance-attributes
             for f in new_ep0:
                 print(f"  • {f.get('title', '?')} → {f.get('url', '?')}")
 
-        answer = input("\nContinue scraping remaining series? (y/n): ").strip().lower()
-        if answer != "y":
+        if not term.confirm("\nContinue scraping remaining series? (y/n): "):
             print("✗ Scraping stopped. Saving progress...")
             self.save_checkpoint(include_data=True)
             if self.failed_links:
