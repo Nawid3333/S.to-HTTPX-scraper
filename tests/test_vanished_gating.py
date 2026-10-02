@@ -17,6 +17,7 @@ stubbing the collaborators does not hollow the test out.
 Run with:  python -m unittest discover -s tests
 """
 
+import asyncio
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -170,14 +171,15 @@ class SeenSlugsTests(_GatingTest):
 
 
 class AccountScopeTests(_GatingTest):
-    """The branch exists, but s.to cannot currently reach it.
+    """An account scope still gets the report-driven decision.
 
     show_vanished_series is informational for subscribed/watchlist/both, so a
-    scope of that kind still needs the report-driven decision -- and the
-    gating below provides it. In production s.to never gets there: its
-    account branch returns without ever setting all_discovered_series, so an
-    account scrape takes the no-catalogue path and is notified instead. Both
-    facts are pinned here, so a future change to either one is visible.
+    scope of that kind still needs the decision the gating below offers. s.to
+    used to never reach it: its account branch returned without setting
+    all_discovered_series, so an account scrape took the no-catalogue path --
+    and main._inject_disappeared_series, which reads the same list, saw no
+    series as listed and offered to clear the flag of every one of them,
+    including the series still on the account page.
     """
 
     def test_an_account_scope_with_a_catalogue_would_offer_the_decision(self):
@@ -187,11 +189,27 @@ class AccountScopeTests(_GatingTest):
                 self.run_scrape(vanished_scope=scope)
                 self.prompt_clean.assert_called_once()
 
-    def test_an_account_scrape_as_s_to_actually_runs_it_is_notified(self):
-        """No catalogue is fetched, so the notify branch is what really fires."""
-        self.run_scrape(catalogue=False, vanished_scope="watchlist")
-        self.notify.assert_called_once()
-        self.prompt_clean.assert_not_called()
+    def test_the_account_branch_records_what_the_pages_listed(self):
+        """The real scraper, not the fake: its account branch sets the list."""
+        from src import scraper as sc
+
+        listed = [entry("alpha"), entry("beta")]
+
+        async def nothing(*_args, **_kwargs):
+            return None
+
+        async def account_pages(client, source="both"):
+            return listed
+
+        real = sc.SToScraper()
+        real._revalidate_ignored_series = nothing
+        real._get_account_series = account_pages
+        real.load_existing_slugs = lambda: {"alpha", "beta"}
+        real._get_ignored_seasons = lambda: set()
+        real._scrape_list = nothing
+        with redirect_stdout(StringIO()):
+            asyncio.run(real._async_run_inner(mock.AsyncMock(), account_source="watchlist"))
+        self.assertEqual(real.all_discovered_series, listed)
 
 
 if __name__ == "__main__":
